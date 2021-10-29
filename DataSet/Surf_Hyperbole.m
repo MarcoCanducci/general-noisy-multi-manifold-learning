@@ -25,7 +25,7 @@ function Data = Surf_Hyperbole(N_Data)
     RadiusB = -R.^2 + 0.25;
     tB = 2*pi.*rand(N_points,1);
     XB = RadiusB.*sin(tB) + 0.5;
-    YB = RadiusB.*cos(tB) -0.5 ;
+    YB = RadiusB.*cos(tB) -0.5;
 
     Data = [XB YB ZB];
 
