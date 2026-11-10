@@ -267,21 +267,26 @@ class MultiManifoldLearner:
         self.timings_["agtm"] = time.perf_counter() - t
         self._done = 4
         self._log(f"agtm: {len(fitted)} models ({self.timings_['agtm']:.2f}s)")
-        n_deg = sum(bool(m.warnings) for m in self.manifolds_)
-        if n_deg:
-            warnings.warn(f"{n_deg} manifold model(s) contain degenerate components; "
-                          "see manifold.warnings and manifold.agtm.diagnostics_", DegenerateModelWarning,
-                          stacklevel=3)
+        n_bad = sum(len(m.agtm.diagnostics_["degenerate"]) for m in fitted)
+        if n_bad:
+            n_all = sum(m.graph.n_nodes for m in fitted)
+            warnings.warn(f"{n_bad} of {n_all} mixture components were flagged as degenerate and handled "
+                          f"according to on_degenerate; see manifold.agtm.diagnostics_",
+                          DegenerateModelWarning, stacklevel=3)
         return self.manifolds_
 
     # ------------------------------------------------------------------ driver
+    def set_data(self, X) -> "MultiManifoldLearner":
+        """Attach data without computing anything; use :meth:`run` to compute stage by stage."""
+        self.X_ = as_points(X)
+        self._done = 0
+        self.timings_ = {}
+        return self
+
     def fit(self, X) -> "MultiManifoldLearner":
         """Run the whole pipeline on ``X`` (n_samples, n_features)."""
         self._validate()
-        self.X_ = as_points(X)
-        set_num_threads(self.n_jobs)
-        self._done = 0
-        self.timings_ = {}
+        self.set_data(X)
         return self.run(until="agtm")
 
     def run(self, until: str = "agtm") -> "MultiManifoldLearner":
@@ -345,7 +350,8 @@ class MultiManifoldLearner:
             lines.append("  graphs     : " + ", ".join(f"{len(v)} of dim {k}" for k, v in self.graphs_.items()))
         if self._done >= 4:
             for k, m in enumerate(self.manifolds_):
-                flag = "  [degenerate components]" if m.warnings else ""
+                nd = 0 if m.agtm is None else len(m.agtm.diagnostics_["degenerate"])
+                flag = f"  [{nd} degenerate component{'s' if nd != 1 else ''}]" if nd else ""
                 lines.append(f"  manifold {k:<2d}: {m!r}{flag}")
         if self.stale_stages:
             lines.append(f"  stale      : {', '.join(self.stale_stages)}")
