@@ -93,6 +93,9 @@ def test_weighted_cov_and_estep(rng):
     R = dens / dens.sum(1, keepdims=True)
     vals = rng.normal(size=(N, 2))
     logp, G, S, CC, Vs = _core.agtm_estep(T, C, wh, logc, vals, True)
+    for rad in (np.full(K, 50.0), np.full(K, 1e-3)):
+        out = _core.agtm_estep(T, C, wh, logc, vals, True, rad)
+        assert all(np.allclose(a, b) for a, b in zip(out, (logp, G, S, CC, Vs)))
     assert np.allclose(logp, np.log(dens.sum(1)))
     assert np.allclose(G, R.sum(0)) and np.allclose(S, R.T @ T) and np.allclose(Vs, R.T @ vals)
     assert np.allclose(CC, np.einsum("nk,na,nb->kab", R, T, T))

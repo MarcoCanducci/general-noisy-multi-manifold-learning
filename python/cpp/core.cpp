@@ -536,7 +536,10 @@ struct Tree {
 // whitening matrices Wh_k (lower-triangular inverse Cholesky factors): D2 = |Wh_k (t - mu_k)|^2.
 // Returns per-point log density and, if stats is true, the sufficient statistics
 //   G_k = sum_n R_nk,  S_k = sum_n R_nk t_n,  C_k = sum_n R_nk t_n t_n^T,  Vs_k = sum_n R_nk values_n.
-py::tuple agtm_estep(DArr T, DArr means, DArr Wh, DArr logc, py::object values_obj, bool stats) {
+// If radii (K,) is given, component k is only evaluated for points within radii[k] of its mean
+// (points with no component in reach fall back to the full sum).
+py::tuple agtm_estep(DArr T, DArr means, DArr Wh, DArr logc, py::object values_obj, bool stats,
+                     py::object radii_obj) {
     check_2d(T, 0, "T");
     const int64_t N = T.shape(0);
     const int d = static_cast<int>(T.shape(1));
@@ -545,7 +548,7 @@ py::tuple agtm_estep(DArr T, DArr means, DArr Wh, DArr logc, py::object values_o
     if (Wh.ndim() != 3 || Wh.shape(0) != K || Wh.shape(1) != d || Wh.shape(2) != d)
         throw std::invalid_argument("whitening matrices must have shape (K, d, d)");
     if (logc.size() != K) throw std::invalid_argument("logc must have one entry per component");
-    DArr values;
+    DArr values, radii;
     int64_t q = 0;
     const double* val = nullptr;
     if (!values_obj.is_none()) {
@@ -554,6 +557,12 @@ py::tuple agtm_estep(DArr T, DArr means, DArr Wh, DArr logc, py::object values_o
             throw std::invalid_argument("values must have one row per data point");
         q = values.shape(1);
         val = values.data();
+    }
+    const double* rad = nullptr;
+    if (!radii_obj.is_none()) {
+        radii = radii_obj.cast<DArr>();
+        if (radii.size() != K) throw std::invalid_argument("radii must have one entry per component");
+        rad = radii.data();
     }
     py::array_t<double> logp(N);
     py::array_t<double> G(stats ? K : 0);
@@ -567,15 +576,58 @@ py::tuple agtm_estep(DArr T, DArr means, DArr Wh, DArr logc, py::object values_o
         gV(stats ? K * q : 0, 0.0);
     {
         py::gil_scoped_release nogil;
+        // components are binned by reach (geometric bins); each bin gets its own tree over the
+        // means and is queried with the bin's largest reach. Tiny bins are always evaluated.
+        struct Bin { KDTree tree; std::vector<int64_t> ids; std::vector<double> mu; double r2; };
+        std::vector<Bin> bins;
+        std::vector<int64_t> big;
+        if (rad && K > 64) {
+            std::vector<int64_t> order(K);
+            std::iota(order.begin(), order.end(), int64_t(0));
+            std::sort(order.begin(), order.end(), [&](int64_t a, int64_t b) { return rad[a] < rad[b]; });
+            int64_t i = 0;
+            while (i < K) {
+                int64_t j = i;
+                const double top = std::max(rad[order[i]], 1e-300) * 1.5;
+                while (j < K && rad[order[j]] <= top) ++j;
+                if (j - i < 16 || !std::isfinite(rad[order[j - 1]])) {
+                    big.insert(big.end(), order.begin() + i, order.begin() + j);
+                } else {
+                    Bin b;
+                    b.ids.assign(order.begin() + i, order.begin() + j);
+                    for (int64_t k : b.ids) b.mu.insert(b.mu.end(), mu + k * d, mu + k * d + d);
+                    b.r2 = rad[order[j - 1]] * rad[order[j - 1]];
+                    bins.push_back(std::move(b));
+                }
+                i = j;
+            }
+            for (auto& b : bins) b.tree = KDTree(b.mu.data(), static_cast<int64_t>(b.ids.size()), d);
+        } else {
+            rad = nullptr;
+        }
 #pragma omp parallel num_threads(n_threads())
         {
-            std::vector<double> la(K), diff(d);
+            std::vector<double> la, diff(d);
+            std::vector<int64_t> cand;
             std::vector<double> lG(gG.size(), 0.0), lS(gS.size(), 0.0), lC(gC.size(), 0.0), lV(gV.size(), 0.0);
-#pragma omp for schedule(static)
+#pragma omp for schedule(dynamic, 256)
             for (int64_t n = 0; n < N; ++n) {
                 const double* x = t + n * d;
+                cand.clear();
+                if (rad) {
+                    cand = big;
+                    for (const auto& b : bins)
+                        b.tree.radius(x, b.r2, [&](int64_t i, double d2) {
+                            const int64_t k = b.ids[i];
+                            if (d2 <= rad[k] * rad[k]) cand.push_back(k);
+                        });
+                }
+                const bool all = cand.empty();
+                const int64_t nc = all ? K : static_cast<int64_t>(cand.size());
+                la.resize(nc);
                 double mx = -std::numeric_limits<double>::infinity();
-                for (int64_t k = 0; k < K; ++k) {
+                for (int64_t c = 0; c < nc; ++c) {
+                    const int64_t k = all ? c : cand[c];
                     const double* m = mu + k * d;
                     const double* w = wh + k * dd;
                     for (int a = 0; a < d; ++a) diff[a] = x[a] - m[a];
@@ -585,23 +637,27 @@ py::tuple agtm_estep(DArr T, DArr means, DArr Wh, DArr logc, py::object values_o
                         for (int b = 0; b <= a; ++b) s += w[a * d + b] * diff[b];
                         d2 += s * s;
                     }
-                    la[k] = lc[k] - 0.5 * d2;
-                    mx = std::max(mx, la[k]);
+                    la[c] = lc[k] - 0.5 * d2;
+                    mx = std::max(mx, la[c]);
                 }
                 double sum = 0.0;
-                for (int64_t k = 0; k < K; ++k) sum += std::exp(la[k] - mx);
+                for (int64_t c = 0; c < nc; ++c) {
+                    la[c] = la[c] - mx > -40.0 ? std::exp(la[c] - mx) : 0.0;
+                    sum += la[c];
+                }
                 lp[n] = mx + std::log(sum);
                 if (!stats) continue;
-                for (int64_t k = 0; k < K; ++k) {
-                    const double rnk = std::exp(la[k] - mx) / sum;
+                for (int64_t c = 0; c < nc; ++c) {
+                    const double rnk = la[c] / sum;
                     if (rnk < 1e-14) continue;
+                    const int64_t k = all ? c : cand[c];
                     lG[k] += rnk;
                     for (int a = 0; a < d; ++a) {
                         const double ra = rnk * x[a];
                         lS[k * d + a] += ra;
                         for (int b = a; b < d; ++b) lC[k * dd + a * d + b] += ra * x[b];
                     }
-                    for (int64_t c = 0; c < q; ++c) lV[k * q + c] += rnk * val[n * q + c];
+                    for (int64_t v = 0; v < q; ++v) lV[k * q + v] += rnk * val[n * q + v];
                 }
             }
 #pragma omp critical
@@ -699,6 +755,6 @@ PYBIND11_MODULE(_core, m) {
              py::arg("max_nodes") = INT64_MAX);
 
     m.def("agtm_estep", &agtm_estep, py::arg("T"), py::arg("means"), py::arg("whiten"), py::arg("logc"),
-          py::arg("values") = py::none(), py::arg("stats") = true);
+          py::arg("values") = py::none(), py::arg("stats") = true, py::arg("radii") = py::none());
     m.def("agtm_resp", &agtm_resp, py::arg("T"), py::arg("means"), py::arg("whiten"), py::arg("logc"));
 }

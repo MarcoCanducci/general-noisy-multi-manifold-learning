@@ -42,18 +42,20 @@ def test_saf_reduces_transverse_noise(rng):
 def test_density_filter_is_order_independent_and_removes_noise(rng):
     ds = datasets.make_three_toroids(scale=0.5, noise_ratio=0.5, random_state=1)
     X = ds.X
-    pipe = Pipeline([SAF(), DensityFilter()])
-    a = pipe.fit_transform(X, r=0.1)
-    perm = rng.permutation(len(X))
-    b = pipe.fit_transform(X[perm], r=0.1)
-    assert set(a.indices.tolist()) == set(perm[b.indices].tolist())
+    for mode in ("core", "core+border"):
+        pipe = Pipeline([SAF(), DensityFilter(mode=mode)])
+        a = pipe.fit_transform(X, r=0.1)
+        perm = rng.permutation(len(X))
+        b = pipe.fit_transform(X[perm], r=0.1)
+        assert set(a.indices.tolist()) == set(perm[b.indices].tolist())
+        assert np.allclose(a.noisy, X[a.indices])
+        if mode == "core":
+            core = a
     kept = np.zeros(len(X), bool)
-    kept[a.indices] = True
-    assert kept[ds.label > 0].mean() > 0.9      # manifold points survive
-    assert kept[ds.label == 0].mean() < 0.35    # most background removed
-    assert np.allclose(a.noisy, X[a.indices])
-    strict = pipe; pipe = Pipeline([SAF(), DensityFilter(mode="core+border")]); a2 = pipe.fit_transform(X, r=0.1)
-    assert set(strict.indices.tolist()) <= set(a.indices.tolist())
+    kept[core.indices] = True
+    assert kept[ds.label > 0].mean() > 0.95     # manifold points survive
+    assert kept[ds.label == 0].mean() < 0.25    # most background removed
+    assert set(core.indices.tolist()) <= set(a.indices.tolist())
 
 
 def test_custom_preprocessor_plugs_in(rng):
