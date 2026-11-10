@@ -1,0 +1,33 @@
+name: python
+
+on:
+  push:
+    paths: ["python/**", ".github/workflows/python.yml"]
+  pull_request:
+    paths: ["python/**", ".github/workflows/python.yml"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: pip install "./python[test,gui]" nbclient nbformat ipykernel
+      - name: Tests
+        run: pytest python/tests -q
+      - name: Notebook
+        if: matrix.python-version == '3.13'
+        run: |
+          python - <<'PY'
+          import nbformat
+          from nbclient import NotebookClient
+          nb = nbformat.read("python/examples/walkthrough.ipynb", as_version=4)
+          NotebookClient(nb, timeout=1800, kernel_name="python3").execute()
+          PY

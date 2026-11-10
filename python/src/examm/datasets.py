@@ -229,8 +229,8 @@ def make_torus3(n_truth=40000, density=25.0, radius=0.3, noise_ratio=0.0, random
 def make_filaments(density=3e5, noise_ratio=1.0, radius=0.03, random_state=None) -> Dataset:
     """Three 1-D filaments (parabola, spiral, tilted circle) in 3-D uniform noise."""
     rng = rng_from(random_state)
-    f1 = noisy_sample(parabolic_arm(8000, rng), radius, density, rng) + [-0.6, 0.0, 0.6]
+    f1 = noisy_sample(parabolic_arm(8000, rng), radius, density, rng) + [-1.4, 0.0, 0.5]
     f2 = noisy_sample(spiral(8000, rng), radius, density, rng)
-    c = circle(8000, 0.45, 3, rng) @ T1.T + [1.0, 0.9, 0.2]
+    c = circle(8000, 0.45, 3, rng) @ T1.T + [1.7, 0.9, 0.5]
     f3 = noisy_sample(c, radius, density, rng)
     return _assemble([f1, f2, f3], [1, 1, 1], ["parabola", "spiral", "circle"], noise_ratio, 0.15, rng)

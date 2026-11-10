@@ -1,5 +1,7 @@
 # general-noisy-multi-manifold-learning
 
+**Python package:** a fast Python/C++ implementation of the methodology for any ambient and intrinsic dimension, with visualisation tools and a step-by-step GUI, lives in [`python/`](python/README.md) (`pip install ./python`). The MATLAB code below is the original implementation.
+
 This is the original matlab implementation of the paper:
 "Probabilistic modelling of general noisy multi-manifolddata sets" by M. Canducci, P. Tino, M. Mastropietro, 2021
 

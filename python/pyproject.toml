@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Probabilistic modelling of general noisy multi-manifold data sets: denoising, dimensionality index, manifold crawling and Abstract GTM"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "AGPL-3.0-or-later" }
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [{ name = "Marco Canducci" }]
 keywords = ["manifold learning", "multi-manifold", "generative topographic mapping", "density estimation", "point clouds"]
 classifiers = [
@@ -36,6 +37,9 @@ density = "examm.preprocess:DensityFilter"
 
 [tool.scikit-build]
 wheel.packages = ["src/examm"]
+# a development copy of the extension in src/ is kept out of the sdist (wheels are built from it)
+wheel.exclude = ["examm/**/__pycache__"]
+sdist.exclude = ["src/examm/_core*.so", "build", "docs/img", "examples/*.ipynb", "**/__pycache__"]
 cmake.build-type = "Release"
 minimum-version = "0.9"
 
@@ -46,4 +50,4 @@ testpaths = ["tests"]
 build = "cp310-* cp311-* cp312-* cp313-*"
 skip = "*-musllinux_* *_i686"
 test-requires = ["pytest", "matplotlib", "networkx"]
-test-command = "pytest {project}/python/tests -q -x"
+test-command = "pytest {project}/python/tests -q -x --ignore={project}/python/tests/test_gui.py"
