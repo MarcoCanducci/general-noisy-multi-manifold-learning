@@ -1,0 +1,102 @@
+"""Dimensionality index of points in a (diffused) point cloud (paper section 4.1)."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from ._util import as_points, build_tree, check_radius
+
+__all__ = ["DimIndexResult", "dimensionality_index", "barycentric", "fisher_distance"]
+
+
+@dataclass
+class DimIndexResult:
+    """Outcome of :func:`dimensionality_index`.
+
+    ``index`` is the spatially smoothed soft index (the one used downstream), ``index_hard``
+    the nearest-ideal-spectrum index. Both take values in 1..d, or 0 where the neighbourhood
+    was too small to decide.
+    """
+
+    index: np.ndarray
+    index_hard: np.ndarray
+    proba: np.ndarray           # (n, d) soft index distribution P_i(j)
+    proba_smooth: np.ndarray    # (n, d) spatially smoothed distribution P^S_i(j)
+    eigenvalues: np.ndarray     # (n, d) normalised local spectrum, descending
+    barycentric: np.ndarray     # (n, d) barycentric coordinates in the simplex S
+    counts: np.ndarray          # (n,) neighbourhood sizes
+    tangents: np.ndarray | None = None  # (n, n_vec, d) leading local eigenvectors
+
+    def counts_per_dim(self) -> dict[int, int]:
+        vals, cnt = np.unique(self.index, return_counts=True)
+        return {int(v): int(c) for v, c in zip(vals, cnt)}
+
+
+def fisher_distance(p, q) -> np.ndarray:
+    """Fisher geodesic distance between points of the probability simplex (eq. 26)."""
+    s = np.sum(np.sqrt(np.clip(p, 0, None) * np.clip(q, 0, None)), axis=-1)
+    return 2.0 * np.arccos(np.clip(s, 0.0, 1.0))
+
+
+def barycentric(spectrum) -> np.ndarray:
+    """Barycentric coordinates of normalised, descending spectra with respect to the ideal
+    spectra s_j = (1/j, ..., 1/j, 0, ..., 0):  alpha_j = j (lambda_j - lambda_{j+1})."""
+    L = np.asarray(spectrum, dtype=float)
+    nxt = np.concatenate([L[..., 1:], np.zeros(L.shape[:-1] + (1,))], axis=-1)
+    return np.clip((L - nxt) * np.arange(1, L.shape[-1] + 1), 0.0, 1.0)
+
+
+def dimensionality_index(X, r: float, *, smooth_factor: float = 1.0, min_points: int | None = None,
+                         n_vec: int = 0, tree=None) -> DimIndexResult:
+    """Estimate the local intrinsic dimensionality of every point.
+
+    Parameters
+    ----------
+    X : (n, d) array
+        Points, normally the diffused set.
+    r : float
+        Radius of the neighbourhoods used for the local PCA.
+    smooth_factor : float
+        The soft index is smoothed over a ball of radius ``smooth_factor * r`` with a Gaussian
+        of the same scale. Use 0 to disable smoothing.
+    min_points : int, optional
+        Minimum neighbourhood size (including the point itself) for a valid estimate.
+        Default ``max(d + 1, 5)``.
+    n_vec : int
+        Number of leading local eigenvectors to return (``tangents``).
+    """
+    X = as_points(X)
+    r = check_radius(r)
+    n, d = X.shape
+    if min_points is None:
+        min_points = max(d + 1, 5)
+    tree = tree if tree is not None else build_tree(X)
+    counts, ev, vec = tree.local_pca(X, r, int(n_vec), int(min_points))
+    tot = ev.sum(axis=1)
+    valid = (counts >= min_points) & (tot > 0)
+    L = np.zeros_like(ev)
+    L[valid] = ev[valid] / tot[valid, None]
+
+    # hard index: closest ideal spectrum s_j in the Fisher metric (eq. 27)
+    js = np.arange(1, d + 1)
+    csum = np.cumsum(np.sqrt(L), axis=1) / np.sqrt(js)
+    dist_ideal = 2.0 * np.arccos(np.clip(csum, 0.0, 1.0))
+    hard = np.where(valid, np.argmin(dist_ideal, axis=1) + 1, 0)
+
+    # soft index: isotropic kernel on the vertices of the full simplex
+    alpha = barycentric(L)
+    kappa = 2.0 * np.arccos(1.0 / np.sqrt(d)) if d > 1 else 1.0
+    dist_vertex = 2.0 * np.arccos(np.clip(np.sqrt(alpha), 0.0, 1.0))
+    P = np.exp(-dist_vertex**2 / (2.0 * kappa**2))
+    P /= P.sum(axis=1, keepdims=True)
+    P[~valid] = 0.0
+
+    if smooth_factor > 0:
+        rs = smooth_factor * r
+        PS = tree.kernel_smooth(P, rs, rs, valid.astype(np.uint8))
+    else:
+        PS = P.copy()
+    index = np.where(valid, np.argmax(PS, axis=1) + 1, 0)
+    return DimIndexResult(index=index, index_hard=hard, proba=P, proba_smooth=PS, eigenvalues=L,
+                          barycentric=alpha, counts=counts, tangents=vec if n_vec > 0 else None)

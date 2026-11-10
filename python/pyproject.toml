@@ -1,0 +1,49 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "examm"
+version = "0.1.0"
+description = "Probabilistic modelling of general noisy multi-manifold data sets: denoising, dimensionality index, manifold crawling and Abstract GTM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Marco Canducci" }]
+keywords = ["manifold learning", "multi-manifold", "generative topographic mapping", "density estimation", "point clouds"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+  "Operating System :: POSIX :: Linux",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = ["numpy>=1.23", "scipy>=1.9"]
+
+[project.optional-dependencies]
+viz = ["matplotlib>=3.6"]
+gui = ["matplotlib>=3.6", "panel>=1.4", "pyvista>=0.43", "vtk>=9.2", "pandas>=1.5"]
+io = ["h5py", "astropy", "pandas>=1.5"]
+test = ["pytest", "matplotlib>=3.6"]
+all = ["examm[viz,gui,io,test]", "networkx"]
+
+[project.scripts]
+examm-gui = "examm.gui.app:main"
+
+[project.entry-points."examm.preprocessors"]
+saf = "examm.preprocess:SAF"
+density = "examm.preprocess:DensityFilter"
+
+[tool.scikit-build]
+wheel.packages = ["src/examm"]
+cmake.build-type = "Release"
+minimum-version = "0.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux_* *_i686"
+test-requires = ["pytest", "matplotlib"]
+test-command = "pytest {project}/python/tests -q -x"
