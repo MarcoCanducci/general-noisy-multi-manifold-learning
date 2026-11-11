@@ -104,6 +104,29 @@ Steps can be registered by name with `examm.preprocess.register` or through the
 | `epsilon` | 1 | Spacing, in hops, of the AGTM basis-function centres. |
 | `agtm_params` | – | Passed to `AGTM`: `max_iter`, `tol`, `zeta_bounds`, `on_degenerate`, ... |
 
+### Hierarchical model and outliers
+
+`examm.HierarchicalAGTM` organises AGTMs in a tree and trains it top-down with the EM scheme of
+Tiňo and Nabney's Hierarchical GTM (IEEE TPAMI 24(5), 2002): the children of a trained model are
+fitted on all points, each weighted by the parent's responsibility for it, siblings compete for
+points, and every model carries a parent-conditional mixing coefficient. Two optional additions
+to the paper: each internal node keeps its own model as a *residual* leaf (points of a structure
+that none of its sub-structures explains), and a uniform *background* leaf sits under the root.
+
+```python
+H = examm.build_hierarchy(X, radii=[0.8, 0.4], background=0.01)   # coarse to fine
+print(H.summary())
+H.score_samples(X)                 # log density (mixture of the leaves)
+H.outliers(X, alpha=1e-3)          # below the 0.1 % quantile of what the structures themselves generate
+H.outliers(X, alpha=None, percentile=1)   # or: the lowest 1 % of the data
+H.background_probability(X); H.residual_probability(X); H.predict(X)
+```
+
+`build_hierarchy` detects structures at the first radius on all data, then searches with each
+finer radius inside the region of every current leaf. A tree can also be assembled by hand with
+`HierarchicalAGTM().set_data(X)` and `add_children(graphs, parent)`. `AGTM.fit` accepts
+`sample_weight`.
+
 ### Degenerate mixture components
 
 The covariance scale `zeta_i` of each AGTM component is unbounded by default. Every EM iteration

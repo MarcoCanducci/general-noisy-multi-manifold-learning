@@ -174,7 +174,7 @@ class AGTM:
         self.W_ = linalg.solve(G, Phi @ V, assume_a="pos").T      # (d, M)
         self.means_ = (self.W_ @ Phi).T                            # (K, d)
 
-    def _local_covariances(self, T, tree):
+    def _local_covariances(self, T, tree, weights=None):
         g = self.graph
         V = self.means_
         K, d = V.shape
@@ -187,7 +187,7 @@ class AGTM:
             ell = np.maximum(ell, 0.1 * ref)
         else:
             ell = np.full(K, float(self.cov_scale))
-        S, mass = tree.weighted_cov(V, ell, 3.0, 5.0)
+        S, mass = tree.weighted_cov(V, ell, 3.0, 5.0, weights)
         # regularise: isotropic fallback where no data, relative eigenvalue floor elsewhere
         bad = ~np.isfinite(S).all(axis=(1, 2))
         S[bad] = 0.0
@@ -253,110 +253,158 @@ class AGTM:
         x, info = cg(op, B.T.reshape(-1), x0=self.W_.T.reshape(-1), rtol=1e-5, maxiter=300)
         return x.reshape(M, d).T
 
-    def fit(self, T) -> "AGTM":
-        """Fit the model to the noisy points ``T`` (n, d) of this manifold."""
+    # ---- stepwise training interface (used by fit and by HierarchicalAGTM)
+    def begin(self, T, sample_weight=None) -> "AGTM":
+        """Initialise the model on data ``T`` without running EM.
+
+        ``sample_weight`` (n,) weights every point's contribution (used for hierarchical
+        training and for undoing a thinning of the data).
+        """
         T = as_points(T, "T")
         N, d = T.shape
         if d != self.graph.nodes.shape[1]:
             raise ValueError("data and graph have different ambient dimensions")
+        w = None
+        if sample_weight is not None:
+            w = np.ascontiguousarray(sample_weight, dtype=float)
+            if w.shape != (N,) or (w < 0).any() or not np.isfinite(w).all() or w.sum() <= 0:
+                raise ValueError("sample_weight must hold one non-negative finite weight per point")
         K = self.graph.n_nodes
-        min_resp = self.min_resp if self.min_resp is not None else d + 1.0
-        tree = build_tree(T)
+        self._T, self._w = T, w
+        self._min_resp = self.min_resp if self.min_resp is not None else d + 1.0
         self._init_weights()
-        empty = self._local_covariances(T, tree)
-        zeta = np.ones(K)
-        frozen = np.zeros(K, bool)
-        reasons: dict[int, str] = {int(k): "no data near node at initialisation" for k in np.flatnonzero(empty)}
-        history, events = [], []
-        state = None
-        status = "max_iter"
+        empty = self._local_covariances(T, build_tree(T), w)
+        self._zeta = np.ones(K)
+        self._frozen = np.zeros(K, bool)
+        self._reasons = {int(k): "no data near node at initialisation" for k in np.flatnonzero(empty)}
+        self._events, self._history, self._state, self._status, self._G = [], [], None, "max_iter", None
+        self._sync()
+        return self
 
-        def flag(ks, why, it):
-            new = [int(k) for k in ks if int(k) not in reasons or not frozen[k]]
-            for k in ks:
-                reasons.setdefault(int(k), why)
-            if new:
-                events.append({"iteration": it, "components": new, "reason": why})
-            return new
+    def _sync(self):
+        """Refresh the quantities derived from the current parameters."""
+        self.zeta_ = self._zeta
+        self.covariances_ = self.Sigma_ * self._zeta[:, None, None]
+        self._Wh, self._logc, self._radii = self._gauss_params(self._zeta)
 
+    def _flag(self, ks, why, it):
+        new = [int(k) for k in ks if int(k) not in self._reasons or not self._frozen[k]]
+        for k in ks:
+            self._reasons.setdefault(int(k), why)
+        if new:
+            self._events.append({"iteration": it, "components": new, "reason": why})
+
+    def _estep(self, sample_weight=None):
+        """Per-point log density under the current parameters and the (weighted) statistics."""
+        w = self._w if sample_weight is None else sample_weight
+        logp, G, S, C, _ = _core.agtm_estep(self._T, self.means_, self._Wh, self._logc, None, True, self._radii, w)
+        self._G = G
+        return logp, G, S, C
+
+    def _mstep(self, G, S, C, it: int = 0) -> bool:
+        """Update weights (eq. 9) and scales (eq. 10). Returns False if training must stop."""
+        d = self._T.shape[1]
+        K = len(G)
+        zeta = self._zeta
+        Gs = np.maximum(G, 1e-300)
+        W_new = self._solve_W(G, S, zeta)
+        V = (W_new @ self.Phi_).T
+        Mk = C - np.einsum("ka,kb->kab", S, V) - np.einsum("ka,kb->kab", V, S) \
+            + G[:, None, None] * np.einsum("ka,kb->kab", V, V)
+        z_new = np.einsum("kab,kba->k", self._Sigma_inv, Mk) / (d * Gs)
+        starved = G < self._min_resp
+        collapsed = ~starved & (z_new < self.collapse_ratio)
+        exploded = ~starved & (z_new > self.explode_ratio)
+        bad = starved | collapsed | exploded | ~np.isfinite(z_new)
+        if bad.any():
+            for mask, why in ((starved, f"effective number of points below {self._min_resp:g}"),
+                              (collapsed, f"covariance scale fell below {self.collapse_ratio:g}"),
+                              (exploded, f"covariance scale exceeded {self.explode_ratio:g}"),
+                              (~np.isfinite(z_new), "non-finite scale")):
+                if mask.any():
+                    self._flag(np.flatnonzero(mask), why, it)
+            if self.on_degenerate == "raise":
+                raise DegenerateModelError(
+                    f"{int(bad.sum())} AGTM component(s) degenerated at iteration {it}: "
+                    + "; ".join(sorted({self._reasons[int(k)] for k in np.flatnonzero(bad)})))
+            if self.on_degenerate == "stop":
+                self._status = "degenerate"
+                return False
+            self._frozen |= bad
+        z_new = np.where(self._frozen, zeta, z_new)
+        if self.zeta_bounds is not None:
+            z_new = np.clip(z_new, *self.zeta_bounds)
+        if not np.all(np.isfinite(W_new)):
+            self._flag(range(K), "non-finite weights", it)
+            self._status = "degenerate"
+            return False
+        self.W_, self.means_, self._zeta = W_new, V, z_new
+        self._sync()
+        return True
+
+    def finish(self, warn: bool = True) -> "AGTM":
+        """Close training: publish diagnostics and release the training data."""
+        K = self.graph.n_nodes
+        self._sync()
+        self.loglik_ = np.asarray(self._history)
+        self.n_iter_ = max(len(self._history) - 1, 0)
+        self.n_samples_ = float(len(self._T) if self._w is None else self._w.sum())
+        self.diagnostics_ = {
+            "status": self._status, "degenerate": np.asarray(sorted(self._reasons), dtype=int),
+            "reasons": self._reasons, "events": self._events, "frozen": self._frozen.copy(),
+            "effective_counts": self._G,
+        }
+        self._T = self._w = self._state = None
+        if warn and self._reasons:
+            warnings.warn(f"AGTM: {len(self._reasons)} of {K} components flagged as degenerate "
+                          f"({'; '.join(sorted(set(self._reasons.values())))}); see diagnostics_",
+                          DegenerateModelWarning, stacklevel=3)
+        return self
+
+    def fit(self, T, sample_weight=None) -> "AGTM":
+        """Fit the model to the noisy points ``T`` (n, d) of this manifold.
+
+        ``sample_weight`` optionally weights the points.
+        """
+        self.begin(T, sample_weight)
+        K = self.graph.n_nodes
+        w = self._w
         for it in range(int(self.max_iter) + 1):
-            Wh, logc, radii = self._gauss_params(zeta)
-            logp, G, S, C, _ = _core.agtm_estep(T, self.means_, Wh, logc, None, True, radii)
-            ll = float(logp.mean())
+            logp, G, S, C = self._estep()
+            ll = float(logp.mean() if w is None else (w @ logp) / w.sum())
+            hist = self._history
             if not np.isfinite(ll):
-                flag(range(K), "non-finite log-likelihood", it)
-                status = "degenerate"
+                self._flag(range(K), "non-finite log-likelihood", it)
+                self._status = "degenerate"
                 break
-            if history and ll < history[-1] - 1e-7 * max(1.0, abs(history[-1])):
-                events.append({"iteration": it, "components": [], "reason": "log-likelihood decreased"})
-                if state is not None:
-                    self.W_, self.means_, zeta = state
-                status = "loglik_decrease"
+            if hist and ll < hist[-1] - 1e-7 * max(1.0, abs(hist[-1])):
+                self._events.append({"iteration": it, "components": [], "reason": "log-likelihood decreased"})
+                if self._state is not None:
+                    self.W_, self.means_, self._zeta = self._state
+                self._status = "loglik_decrease"
                 break
-            history.append(ll)
-            state = (self.W_.copy(), self.means_.copy(), zeta.copy())
+            hist.append(ll)
+            self._state = (self.W_.copy(), self.means_.copy(), self._zeta.copy())
             if it == self.max_iter:
                 break
-            if len(history) > 1 and history[-1] - history[-2] < self.tol:
-                status = "converged"
+            if len(hist) > 1 and hist[-1] - hist[-2] < self.tol:
+                self._status = "converged"
                 break
-            # ---- M-step: weights (eq. 9), then scales (eq. 10) with the new means
-            Gs = np.maximum(G, 1e-300)
-            W_new = self._solve_W(G, S, zeta)
-            V = (W_new @ self.Phi_).T
-            Mk = C - np.einsum("ka,kb->kab", S, V) - np.einsum("ka,kb->kab", V, S) \
-                + G[:, None, None] * np.einsum("ka,kb->kab", V, V)
-            z_new = np.einsum("kab,kba->k", self._Sigma_inv, Mk) / (d * Gs)
-            # ---- degeneracy checks
-            starved = G < min_resp
-            collapsed = ~starved & (z_new < self.collapse_ratio)
-            exploded = ~starved & (z_new > self.explode_ratio)
-            bad = starved | collapsed | exploded | ~np.isfinite(z_new)
-            if bad.any():
-                for mask, why in ((starved, f"effective number of points below {min_resp:g}"),
-                                  (collapsed, f"covariance scale fell below {self.collapse_ratio:g}"),
-                                  (exploded, f"covariance scale exceeded {self.explode_ratio:g}"),
-                                  (~np.isfinite(z_new), "non-finite scale")):
-                    if mask.any():
-                        flag(np.flatnonzero(mask), why, it)
-                if self.on_degenerate == "raise":
-                    raise DegenerateModelError(
-                        f"{int(bad.sum())} AGTM component(s) degenerated at iteration {it}: "
-                        + "; ".join(sorted({reasons[int(k)] for k in np.flatnonzero(bad)})))
-                if self.on_degenerate == "stop":
-                    status = "degenerate"
-                    break
-                frozen |= bad
-            z_new = np.where(frozen, zeta, z_new)
-            if self.zeta_bounds is not None:
-                z_new = np.clip(z_new, *self.zeta_bounds)
-            if not np.all(np.isfinite(W_new)):
-                flag(range(K), "non-finite weights", it)
-                status = "degenerate"
+            if not self._mstep(G, S, C, it):
                 break
-            self.W_, self.means_, zeta = W_new, V, z_new
-
-        self.zeta_ = zeta
-        self.covariances_ = self.Sigma_ * zeta[:, None, None]
-        self._Wh, self._logc, self._radii = self._gauss_params(zeta)
-        self.loglik_ = np.asarray(history)
-        self.n_iter_ = max(len(history) - 1, 0)
-        self.n_samples_ = N
-        self.diagnostics_ = {
-            "status": status, "degenerate": np.asarray(sorted(reasons), dtype=int),
-            "reasons": reasons, "events": events, "frozen": frozen.copy(),
-            "effective_counts": G if "G" in locals() else None,
-        }
-        if reasons:
-            warnings.warn(f"AGTM: {len(reasons)} of {K} components flagged as degenerate "
-                          f"({'; '.join(sorted(set(reasons.values())))}); see diagnostics_",
-                          DegenerateModelWarning, stacklevel=2)
-        return self
+        return self.finish()
 
     # ------------------------------------------------------------------ inference
     def _check(self):
-        if not hasattr(self, "zeta_"):
+        if not hasattr(self, "_Wh"):
             raise RuntimeError("the model is not fitted yet; call fit(T) first")
+
+    def log_density(self, X=None) -> np.ndarray:
+        """Log density under the *current* parameters; ``X=None`` uses the training data while
+        training is in progress (between ``begin`` and ``finish``)."""
+        self._check()
+        X = self._T if X is None else as_points(X)
+        return _core.agtm_estep(X, self.means_, self._Wh, self._logc, None, False, self._radii)[0]
 
     def score_samples(self, X) -> np.ndarray:
         """Log density of each row of ``X``."""

@@ -314,7 +314,14 @@ struct Tree {
     // -------------------------------------------------- kernel covariances
     // C_i = sum_n k_in (t_n - c_i)(t_n - c_i)^T / sum_n k_in, k = exp(-|t - c|^2 / (div * scale_i^2)),
     // truncated at support * scale_i. Returns (C, kernel mass).
-    py::tuple weighted_cov(DArr C, DArr scales, double div, double support) const {
+    py::tuple weighted_cov(DArr C, DArr scales, double div, double support, py::object weights_obj) const {
+        DArr pw;
+        const double* wt = nullptr;
+        if (!weights_obj.is_none()) {
+            pw = weights_obj.cast<DArr>();
+            if (pw.size() != n) throw std::invalid_argument("weights must have one entry per tree point");
+            wt = pw.data();
+        }
         check_2d(C, d, "centres");
         const int64_t m = C.shape(0);
         if (scales.size() != m) throw std::invalid_argument("scales must have one entry per centre");
@@ -335,7 +342,7 @@ struct Tree {
                 const double* ci = c + i * d;
                 double ws = 0.0;
                 t.radius(ci, support * support * l2, [&](int64_t j, double d2) {
-                    const double w = std::exp(d2 * inv);
+                    const double w = std::exp(d2 * inv) * (wt ? wt[j] : 1.0);
                     ws += w;
                     const double* x = row(j);
                     for (int a = 0; a < d; ++a) {
@@ -536,10 +543,11 @@ struct Tree {
 // whitening matrices Wh_k (lower-triangular inverse Cholesky factors): D2 = |Wh_k (t - mu_k)|^2.
 // Returns per-point log density and, if stats is true, the sufficient statistics
 //   G_k = sum_n R_nk,  S_k = sum_n R_nk t_n,  C_k = sum_n R_nk t_n t_n^T,  Vs_k = sum_n R_nk values_n.
+// Optional per-point weights multiply every point's contribution to the statistics (not logp).
 // If radii (K,) is given, component k is only evaluated for points within radii[k] of its mean
 // (points with no component in reach fall back to the full sum).
 py::tuple agtm_estep(DArr T, DArr means, DArr Wh, DArr logc, py::object values_obj, bool stats,
-                     py::object radii_obj) {
+                     py::object radii_obj, py::object weights_obj) {
     check_2d(T, 0, "T");
     const int64_t N = T.shape(0);
     const int d = static_cast<int>(T.shape(1));
@@ -557,6 +565,13 @@ py::tuple agtm_estep(DArr T, DArr means, DArr Wh, DArr logc, py::object values_o
             throw std::invalid_argument("values must have one row per data point");
         q = values.shape(1);
         val = values.data();
+    }
+    DArr pweights;
+    const double* wt = nullptr;
+    if (!weights_obj.is_none()) {
+        pweights = weights_obj.cast<DArr>();
+        if (pweights.size() != T.shape(0)) throw std::invalid_argument("weights must have one entry per data point");
+        wt = pweights.data();
     }
     const double* rad = nullptr;
     if (!radii_obj.is_none()) {
@@ -648,7 +663,7 @@ py::tuple agtm_estep(DArr T, DArr means, DArr Wh, DArr logc, py::object values_o
                 lp[n] = mx + std::log(sum);
                 if (!stats) continue;
                 for (int64_t c = 0; c < nc; ++c) {
-                    const double rnk = la[c] / sum;
+                    const double rnk = la[c] / sum * (wt ? wt[n] : 1.0);
                     if (rnk < 1e-14) continue;
                     const int64_t k = all ? c : cand[c];
                     lG[k] += rnk;
@@ -748,13 +763,14 @@ PYBIND11_MODULE(_core, m) {
              py::arg("valid"))
         .def("saf_step", &Tree::saf_step, py::arg("samples"), py::arg("h"), py::arg("mu"), py::arg("support"))
         .def("weighted_cov", &Tree::weighted_cov, py::arg("centres"), py::arg("scales"),
-             py::arg("div") = 3.0, py::arg("support") = 5.0)
+             py::arg("div") = 3.0, py::arg("support") = 5.0, py::arg("weights") = py::none())
         .def("ball_cover", &Tree::ball_cover, py::arg("c"), py::arg("order"))
         .def("crawl", &Tree::crawl, py::arg("seed"), py::arg("alive"), py::arg("node_of"), py::arg("r"),
              py::arg("j"), py::arg("eta") = 0.75, py::arg("beta") = 0.4, py::arg("min_pts") = 5,
              py::arg("max_nodes") = INT64_MAX);
 
     m.def("agtm_estep", &agtm_estep, py::arg("T"), py::arg("means"), py::arg("whiten"), py::arg("logc"),
-          py::arg("values") = py::none(), py::arg("stats") = true, py::arg("radii") = py::none());
+          py::arg("values") = py::none(), py::arg("stats") = true, py::arg("radii") = py::none(),
+          py::arg("weights") = py::none());
     m.def("agtm_resp", &agtm_resp, py::arg("T"), py::arg("means"), py::arg("whiten"), py::arg("logc"));
 }
