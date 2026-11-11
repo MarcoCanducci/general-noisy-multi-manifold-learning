@@ -106,3 +106,54 @@ def test_build_hierarchy_by_scale(rng):
     assert flagged[truth].mean() > 0.85 and flagged[~truth].mean() < 0.02
     with pytest.raises(RuntimeError):
         HierarchicalAGTM().leaves()
+
+
+def test_regional_orthogonal_outliers(rng):
+    # a circle sampled 20 times more densely on one half than on the other, in 3-D
+    th = np.r_[rng.uniform(0, np.pi, 8000), rng.uniform(np.pi, 2 * np.pi, 400)]
+    clean = np.c_[np.cos(th), np.sin(th), np.zeros(len(th))]
+    X = clean + 0.02 * rng.normal(size=clean.shape)
+    # planted points: on the sparse AND the dense half, pushed off the curve across it
+    tp = np.array([0.5, 1.5, 2.5, 3.6, 4.6, 5.6])
+    planted = np.c_[1.15 * np.cos(tp), 1.15 * np.sin(tp), np.full(6, 0.1)]
+    X = np.vstack([X, planted])
+    is_planted = np.r_[np.zeros(len(clean), bool), np.ones(6, bool)]
+    g = crawl(clean, 0.2, 1, seed=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        H = HierarchicalAGTM(background=0.0).set_data(X)
+        (node,) = H.add_children([g])
+    m = node.model
+    F = m.tangent_frames()
+    assert F.shape == (g.n_nodes, 1, 3) and np.allclose(np.linalg.norm(F[:, 0], axis=1), 1)
+    radial = m.means_ / np.linalg.norm(m.means_, axis=1, keepdims=True)
+    assert np.abs(np.einsum("kd,kd->k", F[:, 0], radial)).max() < 0.2       # tangents are tangent
+    res = H.regional_deviation(X)
+    assert set(res) >= {"leaf", "node", "distance", "d2", "p_value", "regional_rank", "leaf_name"}
+    assert (res["dof"] == 2).all() and (res["leaf"] == 0).all()
+    # the orthogonal distance is the distance to the fitted curve (its piecewise-linear skeleton) ...
+    V, E = m.means_, g.edges
+    a, b = V[E[:, 0]], V[E[:, 1]]
+    sub = np.r_[np.flatnonzero(is_planted), np.arange(0, len(clean), 20)]
+    P = X[sub]
+    t = np.clip(np.einsum("ned,ed->ne", P[:, None] - a[None], b - a) / ((b - a) ** 2).sum(1), 0, 1)
+    brute = np.linalg.norm(P[:, None] - (a[None] + t[:, :, None] * (b - a)[None]), axis=2).min(1)
+    assert np.abs(res["distance"][sub] - brute).max() < 0.01 and np.corrcoef(res["distance"][sub], brute)[0, 1] > 0.99
+    # ... which tracks the distance from the true circle, wherever along it the point sits
+    true_off = np.hypot(np.linalg.norm(X[:, :2], axis=1) - 1, X[:, 2])
+    assert np.corrcoef(res["distance"], true_off)[0, 1] > 0.75
+    assert res["distance"][is_planted].min() > 0.12
+    # planted points stand out regionally on both halves; ordinary points of the sparse half do not
+    assert (res["regional_rank"][is_planted] > 0.99).all() and (res["p_value"][is_planted] < 1e-3).all()
+    sparse_half = (~is_planted) & (X[:, 1] < -0.1)
+    assert (res["regional_rank"][sparse_half] > 0.99).mean() < 0.03
+    assert np.median(res["p_value"][sparse_half]) > 0.1
+    flagged = H.regional_outliers(X, rank=0.99, p_value=1e-3)
+    assert flagged[is_planted].all() and flagged[~is_planted].mean() < 0.005
+    # the density score, by contrast, penalises the whole sparse half
+    s = H.score_samples(X)
+    assert np.median(s[sparse_half]) < np.median(s[(~is_planted) & (X[:, 1] > 0.1)]) - 0.5
+    # positions along the curve are right
+    ang_node = np.arctan2(m.means_[res["node"], 1], m.means_[res["node"], 0])
+    ang = np.arctan2(X[:, 1], X[:, 0])
+    assert np.abs(np.angle(np.exp(1j * (ang - ang_node)))).max() < 0.25

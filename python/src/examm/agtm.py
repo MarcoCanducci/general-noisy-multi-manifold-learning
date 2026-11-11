@@ -429,6 +429,138 @@ class AGTM:
         out = Vs / np.maximum(G, 1e-300)[:, None]
         return out[:, 0] if v.ndim == 1 else out
 
+    # ------------------------------------------------------------------ position and orthogonal deviation
+    def tangent_frames(self) -> np.ndarray:
+        """Orthonormal basis (K, j, d) of the tangent space of the fitted manifold at every node,
+        from the directions to its graph neighbours (and theirs, where a node has too few)."""
+        self._check()
+        g, V = self.graph, self.means_
+        K, d = V.shape
+        j = min(g.dim, d)
+        A = g.adjacency().tolil().rows
+        F = np.zeros((K, j, d))
+        for i in range(K):
+            nb = set(A[i])
+            if len(nb) < j + 1:
+                for a in list(nb):
+                    nb.update(A[a])
+            nb.discard(i)
+            if not nb:
+                F[i, :, :] = np.eye(d)[:j]
+                continue
+            E = V[sorted(nb)] - V[i]
+            _, sv, vt = np.linalg.svd(E, full_matrices=True)
+            F[i] = vt[:j]
+        return F
+
+    def locate(self, X, by: str = "nearest", chunk: int = 4096) -> np.ndarray:
+        """Position of each point on the manifold: index of a node.
+
+        ``by="nearest"`` (default) gives the closest fitted node, the geometric position;
+        ``by="posterior"`` gives the node with the highest responsibility, which also depends on
+        the size of each node's covariance.
+        """
+        self._check()
+        X = as_points(X)
+        if by == "nearest":
+            return build_tree(np.ascontiguousarray(self.means_)).nearest(X)[0]
+        if by != "posterior":
+            raise ValueError("by must be 'nearest' or 'posterior'")
+        out = np.empty(len(X), dtype=np.int64)
+        for a in range(0, len(X), chunk):
+            out[a:a + chunk] = np.argmax(_core.agtm_resp(X[a:a + chunk], self.means_, self._Wh, self._logc), axis=1)
+        return out
+
+    def orthogonal_deviation(self, X, hops: int = 2, min_region: int = 30) -> dict:
+        """How far each point lies from the manifold *across* it, judged locally.
+
+        Every point is placed at its nearest node, then moved along the closest graph edge
+        to the nearest position on it. Its offset from there is projected onto the space
+        orthogonal to the local tangent, which removes any dependence on where
+        along the manifold the point sits and on how densely that part is sampled.
+
+        Returns a dict of arrays, one entry per point:
+
+        ``node``, ``toward``, ``fraction``
+            position on the manifold: the node the point is placed at, and the foot of the point
+            on the closest edge leaving that node, a ``fraction`` of the way to node ``toward``;
+        ``distance``
+            Euclidean length of the orthogonal offset;
+        ``tangential``
+            length of the offset along the manifold;
+        ``d2``, ``dof``, ``p_value``
+            squared Mahalanobis length of the orthogonal offset under the node's covariance
+            restricted to the normal space, its degrees of freedom ``d - j``, and the chi-square
+            tail probability: how likely the model is to place a point at least this far off;
+        ``regional_rank``
+            fraction of the points placed in the same region of the manifold (nodes within
+            ``hops`` graph steps) whose orthogonal distance is smaller. Close to 1 means the
+            point is among the farthest from the manifold at that position. NaN where the
+            region holds fewer than ``min_region`` points;
+        ``region_size``
+            number of points in that region.
+        """
+        from scipy.stats import chi2
+
+        self._check()
+        X = as_points(X)
+        V, C = self.means_, self.covariances_
+        K, d = V.shape
+        j = min(self.graph.dim, d)
+        m = d - j
+        node = self.locate(X)
+        F = self.tangent_frames()
+        n = len(X)
+        dist, tang, d2 = np.zeros(n), np.zeros(n), np.full(n, np.nan)
+        toward, frac = node.copy(), np.zeros(n)
+        nbrs = self.graph.adjacency().tolil().rows
+        order = np.argsort(node, kind="stable")
+        starts = np.searchsorted(node[order], np.arange(K + 1))
+        for i in range(K):
+            idx = order[starts[i]:starts[i + 1]]
+            if len(idx) == 0:
+                continue
+            off = X[idx] - V[i]
+            along = off @ F[i].T
+            tang[idx] = np.linalg.norm(along, axis=1)
+            if m == 0:
+                continue
+            # refine the position along the graph: foot of the point on the closest incident edge
+            if nbrs[i]:
+                E = V[nbrs[i]] - V[i]                                    # (e, d) edge vectors
+                t = np.clip((off @ E.T) / np.maximum((E * E).sum(1), 1e-300), 0.0, 1.0)   # (n_i, e)
+                gap = np.linalg.norm(off[:, None, :] - t[:, :, None] * E[None], axis=2)
+                best = np.argmin(gap, axis=1)
+                tb = t[np.arange(len(idx)), best]
+                off = off - tb[:, None] * E[best]
+                toward[idx] = np.asarray(nbrs[i])[best]
+                frac[idx] = tb
+            Nb = np.linalg.svd(F[i], full_matrices=True)[2][j:]          # (m, d) basis of the normal space
+            r = off @ Nb.T
+            dist[idx] = np.linalg.norm(r, axis=1)
+            Cn = Nb @ C[i] @ Nb.T
+            d2[idx] = np.einsum("na,ab,nb->n", r, np.linalg.inv(Cn + 1e-300 * np.eye(m)), r)
+        p = chi2.sf(d2, m) if m > 0 else np.full(n, np.nan)
+        # regional rank: compare with the points placed within `hops` steps on the graph
+        A = self.graph.adjacency() + sparse.identity(K, format="csr")
+        reach = A.copy()
+        for _ in range(max(int(hops), 0) - 1 if hops > 0 else 0):
+            reach = (reach @ A)
+        reach = (reach if hops > 0 else sparse.identity(K, format="csr")).tolil().rows
+        rank, size = np.full(n, np.nan), np.zeros(n, dtype=np.int64)
+        for i in range(K):
+            idx = order[starts[i]:starts[i + 1]]
+            if len(idx) == 0:
+                continue
+            pool = np.concatenate([order[starts[a]:starts[a + 1]] for a in reach[i]])
+            size[idx] = len(pool)
+            if len(pool) >= min_region and m > 0:
+                ref = np.sort(dist[pool])
+                rank[idx] = np.searchsorted(ref, dist[idx], side="left") / max(len(pool) - 1, 1)
+        return {"node": node, "toward": toward, "fraction": frac, "distance": dist, "tangential": tang, "d2": d2,
+                "dof": np.full(n, m), "p_value": p,
+                "regional_rank": np.clip(rank, 0.0, 1.0), "region_size": size}
+
     def sample(self, n: int, random_state=None) -> np.ndarray:
         """Draw ``n`` points from the model."""
         self._check()

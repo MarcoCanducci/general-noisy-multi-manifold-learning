@@ -282,6 +282,54 @@ class HierarchicalAGTM:
         kinds = np.array([k for _, k, _ in self.leaves()])
         return self.leaf_responsibilities(X)[:, kinds == "residual"].sum(1)
 
+    def regional_deviation(self, X, hops: int = 2, min_region: int = 30) -> dict:
+        """Regional, across-the-manifold outlier scores from the global model.
+
+        Each point is assigned to its most probable structure among all leaves of the hierarchy
+        (the uniform background is left out, so every point gets a structure) and then scored
+        with :meth:`AGTM.orthogonal_deviation` on that structure: where it sits on the manifold,
+        how far off it lies in the space orthogonal to the local tangent, and how that compares
+        with the other points at the same position.
+
+        Returns the arrays of :meth:`AGTM.orthogonal_deviation` plus ``leaf`` (index into
+        :meth:`leaves`), ``leaf_name``, ``leaf_probability`` (posterior of that leaf) and
+        ``background_probability``.
+        """
+        X = as_points(X)
+        leaves = self.leaves()
+        names = np.array(self.leaf_names(), dtype=object)
+        R = self.leaf_responsibilities(X)
+        structured = np.array([k != "background" for _, k, _ in leaves])
+        bgp = R[:, ~structured].sum(1)
+        Rs = np.where(structured[None, :], R, -1.0)
+        leaf = np.argmax(Rs, axis=1)
+        zero = Rs.max(1) <= 0                       # no structure has any posterior: use the densest one
+        if zero.any():
+            A = self._leaf_logp(X[zero])
+            A[:, ~structured] = -np.inf
+            leaf[zero] = np.argmax(A, axis=1)
+        n = len(X)
+        out = {"node": np.full(n, -1, dtype=np.int64), "toward": np.full(n, -1, dtype=np.int64),
+               "fraction": np.zeros(n), "distance": np.zeros(n), "tangential": np.zeros(n),
+               "d2": np.full(n, np.nan), "dof": np.zeros(n, dtype=np.int64), "p_value": np.full(n, np.nan),
+               "regional_rank": np.full(n, np.nan), "region_size": np.zeros(n, dtype=np.int64)}
+        for k in np.unique(leaf):
+            sel = np.flatnonzero(leaf == k)
+            res = leaves[k][0].model.orthogonal_deviation(X[sel], hops=hops, min_region=min_region)
+            for key, v in res.items():
+                out[key][sel] = v
+        out.update(leaf=leaf, leaf_name=names[leaf], leaf_probability=R[np.arange(n), leaf], background_probability=bgp)
+        return out
+
+    def regional_outliers(self, X, rank: float = 0.99, p_value: float | None = None, **kw) -> np.ndarray:
+        """Mask of points that are among the farthest from their structure at their position:
+        ``regional_rank >= rank`` and, if given, a model tail probability below ``p_value``."""
+        res = self.regional_deviation(X, **kw)
+        flag = res["regional_rank"] >= rank
+        if p_value is not None:
+            flag &= res["p_value"] < p_value
+        return flag
+
     def sample(self, n: int, random_state=None, include_background: bool = True) -> np.ndarray:
         """Draw ``n`` points from the hierarchy (optionally from its structured leaves only)."""
         rng = rng_from(random_state)

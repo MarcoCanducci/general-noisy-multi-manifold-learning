@@ -122,6 +122,22 @@ H.outliers(X, alpha=None, percentile=1)   # or: the lowest 1 % of the data
 H.background_probability(X); H.residual_probability(X); H.predict(X)
 ```
 
+**Regional outliers.** The density score above is low wherever the data are sparse. To ask
+instead which points lie farthest *off* a structure at a given position on it, use
+
+```python
+res = H.regional_deviation(X)      # dict of arrays, one entry per point
+res["leaf_name"], res["node"]      # the structure and the position on it (node; plus toward / fraction)
+res["distance"]                    # offset in the space orthogonal to the local tangent
+res["p_value"]                     # model tail probability of an offset at least this large
+res["regional_rank"]               # rank among the points at the same position (within `hops` graph steps)
+H.regional_outliers(X, rank=0.99, p_value=1e-3)
+```
+
+Every point is assigned to its most probable structure in the global model, placed at the
+nearest position on that structure's graph, and its offset is measured across the manifold
+only. `AGTM.orthogonal_deviation` does the same for a single model.
+
 `build_hierarchy` detects structures at the first radius on all data, then searches with each
 finer radius inside the region of every current leaf. A tree can also be assembled by hand with
 `HierarchicalAGTM().set_data(X)` and `add_children(graphs, parent)`. `AGTM.fit` accepts
