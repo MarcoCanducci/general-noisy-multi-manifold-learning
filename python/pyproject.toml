@@ -34,6 +34,7 @@ examm-gui = "examm.gui.app:main"
 [project.entry-points."examm.preprocessors"]
 saf = "examm.preprocess:SAF"
 density = "examm.preprocess:DensityFilter"
+thin = "examm.preprocess:DensityThin"
 
 [tool.scikit-build]
 wheel.packages = ["src/examm"]

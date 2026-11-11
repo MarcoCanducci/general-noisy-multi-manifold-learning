@@ -19,10 +19,10 @@ from typing import Callable, Sequence
 
 import numpy as np
 
-from ._util import as_points, build_tree, check_radius
+from ._util import as_points, build_tree, check_radius, rng_from
 
 __all__ = [
-    "PreprocessResult", "Preprocessor", "SAF", "DensityFilter", "Pipeline", "Identity",
+    "PreprocessResult", "Preprocessor", "SAF", "DensityFilter", "DensityThin", "Pipeline", "Identity",
     "register", "available", "resolve",
 ]
 
@@ -186,6 +186,53 @@ class DensityFilter(Preprocessor):
         return out
 
 
+class DensityThin(Preprocessor):
+    """Even out the sampling density by randomly thinning over-dense regions.
+
+    A point with ``n`` neighbours within ``radius`` (itself included) is kept with probability
+    ``min(1, target / n)``. Regions with fewer than ``target`` points per ball are left
+    untouched; denser regions are reduced to about ``target`` points per ball. Use it as the
+    first step when the density of the data spans orders of magnitude, so that one scale ``r``
+    can serve the whole data set. The points that are dropped are not lost for good: they can
+    be scored or assigned afterwards with the fitted model.
+
+    Parameters
+    ----------
+    radius : float, optional
+        Radius of the ball used to measure density. Default ``radius_factor * r``.
+    radius_factor : float
+        Used when ``radius`` is None (default 1.0).
+    target : float
+        Number of points per ball above which a region is thinned.
+    random_state : int or Generator
+        Seed of the random selection (default 0, so results are reproducible).
+    """
+
+    name = "thin"
+
+    def __init__(self, radius: float | None = None, radius_factor: float = 1.0, target: float = 30,
+                 random_state=0):
+        if target <= 0:
+            raise ValueError("target must be positive")
+        self.radius = radius
+        self.radius_factor = radius_factor
+        self.target = target
+        self.random_state = random_state
+
+    def apply(self, state, r):
+        rad = check_radius(self.radius if self.radius is not None else self.radius_factor * r, "radius")
+        counts = build_tree(state.noisy).radius_count(state.noisy, rad)
+        prob = np.minimum(1.0, self.target / counts)
+        seed = self.random_state
+        rng = rng_from(seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed))
+        keep = rng.uniform(size=len(counts)) < prob
+        out = state.select(keep)
+        out.info["thin_counts"] = counts[keep]
+        out.info["thin_probability"] = prob[keep]
+        out.info["thin_counts_all"] = counts
+        return out
+
+
 class Pipeline(Preprocessor):
     """Apply several preprocessing steps in sequence."""
 
@@ -205,6 +252,8 @@ _REGISTRY: dict[str, Callable[[], Preprocessor]] = {
     "saf": lambda: Pipeline([SAF(), DensityFilter()]),
     "saf-only": SAF,
     "density": DensityFilter,
+    "thin": DensityThin,
+    "thin+saf": lambda: Pipeline([DensityThin(), SAF(), DensityFilter()]),
 }
 
 

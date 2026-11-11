@@ -58,7 +58,7 @@ Each stage can also be used on its own.
 
 | Stage | Function / class | What it does |
 |---|---|---|
-| Preprocess | `examm.SAF`, `examm.DensityFilter`, `examm.Pipeline` | Diffuses points towards the cores of the structures and removes points in sparse regions. Returns row-aligned *noisy* and *diffused* point sets. |
+| Preprocess | `examm.SAF`, `examm.DensityFilter`, `examm.DensityThin`, `examm.Pipeline` | Diffuses points towards the cores of the structures and removes points in sparse regions. `DensityThin` optionally thins over-dense regions first, for data whose density spans orders of magnitude. Returns row-aligned *noisy* and *diffused* point sets. |
 | Dimensionality index | `examm.dimensionality_index` | Local PCA; the normalised spectrum is compared with the ideal spectra on the probability simplex (Fisher metric), then smoothed spatially. |
 | Graphs | `examm.multi_manifold_crawl`, `examm.crawl`, `examm.epsilon_graph` | Manifold crawling builds a graph skeleton of every manifold of a given dimension; the epsilon-graph is the faster, less stable alternative of the paper's section 4.3. |
 | Density model | `examm.AGTM`, `examm.MultiManifoldModel` | Abstract GTM: manifold-aligned Gaussian mixture on each graph, trained by EM; all models combine into one hierarchical mixture. Also gives curvature along graph edges and node-wise means of any per-point quantity. |

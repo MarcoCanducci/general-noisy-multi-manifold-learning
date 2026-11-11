@@ -4,7 +4,7 @@ import pytest
 import examm
 from examm import datasets
 from examm.dimension import barycentric, dimensionality_index, fisher_distance
-from examm.preprocess import SAF, DensityFilter, Pipeline, PreprocessResult, Preprocessor, resolve
+from examm.preprocess import SAF, DensityFilter, DensityThin, Pipeline, PreprocessResult, Preprocessor, resolve
 
 
 def saf_reference(samples, original, h, mu, support):
@@ -119,3 +119,27 @@ def test_d1_dimension_index_matches_paper_quality():
     dim = ds.dim[res.indices]
     for j, want in ((1, 0.9), (2, 0.95), (3, 0.9)):   # paper Fig. 12: 0.98 / 0.99 / 0.95
         assert (di.index[dim == j] == j).mean() > want, j
+
+
+def test_density_thinning_evens_out_the_sampling(rng):
+    dense = rng.normal(size=(20000, 3)) * 0.2
+    sparse = rng.uniform(-3, 3, size=(2000, 3))
+    X = np.vstack([dense, sparse])
+    out = DensityThin(target=20).fit_transform(X, r=0.3)
+    tree = examm._core.KDTree(out.noisy)
+    before = examm._core.KDTree(X).radius_count(X, 0.3)
+    after = tree.radius_count(out.noisy, 0.3)
+    assert before.max() > 1000 and np.quantile(after, 0.99) < 45        # dense core reduced to about the target
+    kept = np.isin(np.arange(len(X)), out.indices)
+    assert kept[before <= 20].all()                                      # sparse regions untouched
+    assert np.allclose(out.noisy, X[out.indices]) and np.allclose(out.diffused, out.noisy)
+    assert len(out.info["thin_probability"]) == len(out)
+    again = DensityThin(target=20).fit_transform(X, r=0.3)
+    assert np.array_equal(out.indices, again.indices)                    # reproducible by default
+    other = DensityThin(target=20, random_state=1).fit_transform(X, r=0.3)
+    assert not np.array_equal(out.indices, other.indices)
+    piped = Pipeline([DensityThin(target=20), SAF(n_iter=2)]).fit_transform(X, r=0.3)
+    assert np.array_equal(piped.indices, out.indices)
+    assert isinstance(resolve("thin"), DensityThin)
+    with pytest.raises(ValueError):
+        DensityThin(target=0)
