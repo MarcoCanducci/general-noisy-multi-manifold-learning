@@ -102,3 +102,8 @@ def test_graph_embedding_unfolds_structures_in_their_own_dimension(rng):
     S = viewer_payload(X, {"a": H})["versions"][0]["structures"]
     assert S[1]["m"] == 2 and all(k in S[1] for k in ("emb", "arc", "curv", "zeta", "degen", "noise"))
     assert len(np.frombuffer(base64.b64decode(S[1]["curv"]), np.float32)) == 20
+    # covariances for the density surfaces: upper triangles, row by row
+    tri = np.frombuffer(base64.b64decode(S[1]["cov"]), np.float32).reshape(S[1]["n_nodes"], 6)
+    leaf = H.root_.children[0].children[0].model
+    assert np.allclose(tri, leaf.covariances_[:, np.triu_indices(3)[0], np.triu_indices(3)[1]], rtol=1e-5, atol=1e-8)
+    assert S[3]["cov"] == "" and S[3]["graph_of"] == 0

@@ -187,6 +187,10 @@ again; `examples/05_viewer_for_your_data.py` does both from the command line.
   outliers per node, degree, curvature, noise scale, covariance scale, degenerate components or
   the mean of any feature or label; edges by curvature, length or the distortion of the layout;
   node size can follow the number of points.
+- **Model density**: iso-surfaces (iso-curves when z is set to "none") of the fitted model
+  projected onto the shown features, for the ticked structures together or separately. Each
+  surface encloses a chosen share (50, 90, 99, 99.9 %) of the model's probability mass, so
+  outliers can be checked against the model they are judged by.
 - **Outliers**: on any per-point score (log density, orthogonal distance, its Mahalanobis form
   and tail probability, regional rank, background probability), by percentile or by an explicit
   threshold, over all shown points or within each structure. Selections download as CSV.

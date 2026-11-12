@@ -89,6 +89,7 @@ def _version_payload(H, X, hops: int, min_region: int) -> dict:
     res = H.regional_deviation(X, hops=hops, min_region=min_region)
     leaves = H.leaves()
     structures, node_id = [], {}
+    iu = np.triu_indices(X.shape[1])            # covariances are shipped as upper triangles, row by row
 
     def walk(node, parent_id):
         for c in node.children:
@@ -107,14 +108,15 @@ def _version_payload(H, X, hops: int, min_region: int) -> dict:
                                "arc": _b64(arc, np.float32) if len(arc) else "",
                                "curv": _b64(c.model.edge_curvature(), np.float32),
                                "zeta": _b64(c.model.zeta_, np.float32), "degen": _b64(degen, np.float32),
-                               "noise": _b64(np.sqrt(np.einsum("kaa->k", cov) / cov.shape[1]), np.float32)})
+                               "noise": _b64(np.sqrt(np.einsum("kaa->k", cov) / cov.shape[1]), np.float32),
+                               "cov": _b64(cov[:, iu[0], iu[1]], np.float32)})
             walk(c, sid)
             if c.children and c.pi_residual > 0:
                 rid = len(structures)
                 structures.append({"id": rid, "label": f"{c.label} (residual)", "parent": sid, "level": c.level + 1,
                                    "dim": int(g.dim), "kind": "residual", "weight": float(c.weight * c.pi_residual),
                                    "nodes": "", "n_nodes": 0, "edges": "", "graph_of": sid,
-                                   "emb": "", "m": 0, "arc": "", "curv": "", "zeta": "", "degen": "", "noise": ""})
+                                   "emb": "", "m": 0, "arc": "", "curv": "", "zeta": "", "degen": "", "noise": "", "cov": ""})
                 node_id[("res", id(c))] = rid
 
     walk(H.root_, -1)
@@ -267,6 +269,16 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <div class="row tight" style="margin-bottom:6px"><button id="all">All</button><button id="none">None</button><button id="leavesonly">Leaves only</button><button id="top">Residuals only</button></div>
   <div id="tree"></div>
   <p class="hint">Ticking a parent ticks everything under it. "(residual)" holds the points of a parent that none of its children explains; its graph is the parent's.</p>
+  <div class="viewonly only3d">
+  <h2>Model density</h2>
+  <label for="isomode">Iso-surfaces (iso-curves in 2-D) of the fitted model</label>
+  <select id="isomode"><option value="off">off</option><option value="all">the ticked structures together (all ticked = whole hierarchy)</option><option value="each">each ticked structure separately</option></select>
+  <div class="row tight" style="flex-wrap:wrap;gap:4px 12px;margin-top:4px">
+    <label class="check"><input type="checkbox" class="isolvl" value="0.5"> 50 %</label><label class="check"><input type="checkbox" class="isolvl" value="0.9" checked> 90 %</label>
+    <label class="check"><input type="checkbox" class="isolvl" value="0.99" checked> 99 %</label><label class="check"><input type="checkbox" class="isolvl" value="0.999"> 99.9 %</label></div>
+  <label for="isores">Resolution</label><select id="isores"><option value="32">coarse</option><option value="48" selected>medium</option><option value="64">fine</option></select>
+  <p class="hint">Each surface encloses the stated share of the model's probability mass, for the model projected onto the shown features (its exact marginal). Points outside the outer surface are unlikely under the model <i>in this projection</i>; the outlier scores use all features, so a point can be an outlier without leaving the surfaces here. Choose "(none)" for z to get a 2-D view with iso-curves.</p>
+  </div>
   <h2>Extra labels</h2>
   <input type="file" id="xfile" accept=".csv,.tsv,.txt">
   <p class="hint">Load a CSV with a header line to colour by your own per-point values (numbers or categories): either one line per point in the original order, or with a column named <b>row</b> holding the point index. The file stays in your browser.</p>
@@ -296,8 +308,10 @@ const N=DATA.n, D=DATA.d, X=dec(DATA.X, Float32Array);
 const V = DATA.versions.map(v => ({name:v.name, summary:v.summary, sid:dec(v.sid,Int16Array), node:dec(v.node,Int32Array),
   toward:dec(v.toward,Int32Array), frac:dec(v.frac,Float32Array),
   scores:Object.fromEntries(Object.entries(v.scores).map(([k,b])=>[k,dec(b,Float32Array)])),
-  S:v.structures.map(s=>({...s, nodes:dec(s.nodes,Float32Array), edges:dec(s.edges,Int32Array), emb:dec(s.emb,Float32Array), arc:dec(s.arc,Float32Array), curv:dec(s.curv,Float32Array), zeta:dec(s.zeta,Float32Array), degen:dec(s.degen,Float32Array), noise:dec(s.noise,Float32Array), on:s.kind!=="group", colour:colourOf(s.id)}))}));
+  S:v.structures.map(s=>({...s, nodes:dec(s.nodes,Float32Array), edges:dec(s.edges,Int32Array), emb:dec(s.emb,Float32Array), arc:dec(s.arc,Float32Array), curv:dec(s.curv,Float32Array), zeta:dec(s.zeta,Float32Array), degen:dec(s.degen,Float32Array), noise:dec(s.noise,Float32Array), cov:dec(s.cov,Float32Array), on:s.kind!=="group", colour:colourOf(s.id)}))}));
 let view = "3d";
+const TRI = D*(D+1)/2;
+let lastThree = null;
 const EXTRA = (DATA.extra||[]).map(e=>({name:e.name, kind:e.kind, cats:e.cats||[], values: e.kind==="num" ? dec(e.values,Float32Array) : dec(e.values,Int32Array)}));
 function extraOf(key){ return key && key.startsWith("x:") ? EXTRA[+key.slice(2)] : null; }
 function refreshExtraOptions(){
@@ -338,7 +352,7 @@ const $ = id => document.getElementById(id);
 let cur = 0, lastOut = null;
 function fill(sel, items, val){ sel.innerHTML=""; items.forEach(([v,t])=>{const o=document.createElement("option");o.value=v;o.textContent=t;sel.appendChild(o);}); if(val!==undefined) sel.value=val; }
 fill($("version"), V.map((v,i)=>[i,v.name]));
-for(let a=0;a<3;a++) fill($("ax"+a), DATA.names.map((n,i)=>[i,n]), Math.min(a,D-1));
+for(let a=0;a<3;a++) fill($("ax"+a), DATA.names.map((n,i)=>[i,n]).concat(a===2?[[-1,"(none: 2-D view)"]]:[]), a<D ? a : (a===2?-1:D-1));
 
 fill($("score"), DATA.scores.map(s=>[s.key,s.label]));
 function children(v, id){ return v.S.filter(s=>s.parent===id); }
@@ -521,43 +535,94 @@ function drawGraph(){
   $("outinfo").innerHTML = `<b>${r.nout.toLocaleString()}</b> outliers among ${r.nshown.toLocaleString()} points of this structure (${r.nshown? (100*r.nout/r.nshown).toFixed(2):"0"} %)<br><span class="kind">${meta.low?"low":"high"} values are outliers · ${Number.isFinite(cut)? "cut at "+cut.toPrecision(4) : r.info}</span>`;
   $("status").textContent = `${v.name} · structure ${s.label}: ${s.dim}-D, ${K} nodes, ${n} edges, ${idx.length.toLocaleString()} points · ${kind}`;
 }
-function setView(w){ view=w; document.body.className = w==="graph" ? "vgraph" : "v3d"; document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===w)); Plotly.purge("plot"); draw(); }
+function setView(w){ view=w; document.body.className = w==="graph" ? "vgraph" : "v3d"; document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===w)); Plotly.purge("plot"); lastThree=null; draw(); }
+function triIndex(a,b){ if(a>b){ const t=a;a=b;b=t; } return a*D - (a*(a-1))/2 + (b-a); }
+function gridDensity(structs, ax, G){
+  // marginal density of the selected leaves on the shown features, splatted on a regular grid
+  const nd=ax.length, lo=new Array(nd).fill(Infinity), hi=new Array(nd).fill(-Infinity), v=V[cur];
+  structs.forEach(s=>{ const g=v.S[s.graph_of], K=g.n_nodes; for(let k=0;k<K;k++) for(let a=0;a<nd;a++){ const mu=g.nodes[k*D+ax[a]], sd=Math.sqrt(Math.max(g.cov[k*TRI+triIndex(ax[a],ax[a])],0)); if(mu-3.5*sd<lo[a]) lo[a]=mu-3.5*sd; if(mu+3.5*sd>hi[a]) hi[a]=mu+3.5*sd; } });
+  if(!lo.every(Number.isFinite)) return null;
+  const h=lo.map((l,a)=>(hi[a]-l)/(G-1)), n=Math.pow(G,nd), val=new Float32Array(n); let wsum=0; structs.forEach(s=>wsum+=s.weight);
+  structs.forEach(s=>{ const g=v.S[s.graph_of], K=g.n_nodes, w=s.weight/wsum/K;
+    for(let k=0;k<K;k++){
+      const mu=[], C=[]; for(let a=0;a<nd;a++){ mu.push(g.nodes[k*D+ax[a]]); for(let b=0;b<nd;b++) C.push(g.cov[k*TRI+triIndex(ax[a],ax[b])]); }
+      let inv, det;
+      if(nd===2){ det=C[0]*C[3]-C[1]*C[2]; if(!(det>0)) continue; inv=[C[3]/det,-C[1]/det,-C[2]/det,C[0]/det]; }
+      else { const c00=C[4]*C[8]-C[5]*C[7], c01=C[5]*C[6]-C[3]*C[8], c02=C[3]*C[7]-C[4]*C[6]; det=C[0]*c00+C[1]*c01+C[2]*c02; if(!(det>0)) continue;
+        inv=[c00/det,(C[2]*C[7]-C[1]*C[8])/det,(C[1]*C[5]-C[2]*C[4])/det, c01/det,(C[0]*C[8]-C[2]*C[6])/det,(C[2]*C[3]-C[0]*C[5])/det, c02/det,(C[1]*C[6]-C[0]*C[7])/det,(C[0]*C[4]-C[1]*C[3])/det]; }
+      const norm=w/Math.sqrt(Math.pow(2*Math.PI,nd)*det), i0=[], i1=[];
+      for(let a=0;a<nd;a++){ const sd=Math.sqrt(C[a*nd+a]); i0.push(Math.max(0,Math.floor((mu[a]-3.5*sd-lo[a])/h[a]))); i1.push(Math.min(G-1,Math.ceil((mu[a]+3.5*sd-lo[a])/h[a]))); }
+      if(nd===2){ for(let j=i0[1];j<=i1[1];j++){ const dy=lo[1]+j*h[1]-mu[1]; for(let i=i0[0];i<=i1[0];i++){ const dx=lo[0]+i*h[0]-mu[0]; const q=dx*(inv[0]*dx+inv[1]*dy)+dy*(inv[2]*dx+inv[3]*dy); if(q<25) val[j*G+i]+=norm*Math.exp(-0.5*q); } } }
+      else { for(let l=i0[2];l<=i1[2];l++){ const dz=lo[2]+l*h[2]-mu[2]; for(let j=i0[1];j<=i1[1];j++){ const dy=lo[1]+j*h[1]-mu[1]; for(let i=i0[0];i<=i1[0];i++){ const dx=lo[0]+i*h[0]-mu[0];
+        const q=dx*(inv[0]*dx+inv[1]*dy+inv[2]*dz)+dy*(inv[3]*dx+inv[4]*dy+inv[5]*dz)+dz*(inv[6]*dx+inv[7]*dy+inv[8]*dz); if(q<25) val[(l*G+j)*G+i]+=norm*Math.exp(-0.5*q); } } } }
+    } });
+  return {lo,h,G,nd,val};
+}
+function massLevels(grid, masses){ // density value whose super-level set holds the given share of the model's mass
+  const s=Float32Array.from(grid.val).sort(), n=s.length; let tot=0; for(let i=0;i<n;i++) tot+=s[i];
+  const out=[]; masses.forEach(p=>{ let acc=0, lvl=s[n-1]; for(let i=n-1;i>=0;i--){ acc+=s[i]; if(acc>=p*tot){ lvl=s[i]; break; } } out.push(lvl); }); return out; }
+function densityTraces(ax){
+  const mode=$("isomode").value; if(mode==="off") return {traces:[],note:""};
+  const v=V[cur], three=ax.length===3, masses=[...document.querySelectorAll(".isolvl:checked")].map(e=>+e.value).sort((a,b)=>a-b);
+  if(!masses.length) return {traces:[],note:""};
+  let sel=v.S.filter(s=>s.on && s.kind!=="group" && v.S[s.graph_of].n_nodes>0), note="";
+  if(!sel.length) return {traces:[],note:""};
+  const G = three ? +$("isores").value : 4*(+$("isores").value);
+  const groups = mode==="each" ? sel.sort((a,b)=>b.weight-a.weight).slice(0,12).map(s=>[s]) : [sel];
+  if(mode==="each" && sel.length>12) note=" · density drawn for the 12 heaviest ticked structures";
+  const traces=[];
+  groups.forEach(gr=>{ const grid=gridDensity(gr,ax,G); if(!grid) return; const lv=massLevels(grid,masses), col = mode==="each" ? gr[0].colour : "#17457f";
+    const coords=a=>Array.from({length:G},(_,i)=>grid.lo[a]+i*grid.h[a]);
+    if(three){ const n=G*G*G, xs=new Float32Array(n), ys=new Float32Array(n), zs=new Float32Array(n); let t=0;
+      for(let l=0;l<G;l++) for(let j=0;j<G;j++) for(let i=0;i<G;i++){ xs[t]=grid.lo[0]+i*grid.h[0]; ys[t]=grid.lo[1]+j*grid.h[1]; zs[t]=grid.lo[2]+l*grid.h[2]; t++; }
+      lv.forEach((L,q)=>{ if(!(L>0)) return; traces.push({type:"isosurface",x:xs,y:ys,z:zs,value:grid.val,isomin:L,isomax:L,surface:{count:1},caps:{x:{show:false},y:{show:false},z:{show:false}},
+        colorscale:[[0,col],[1,col]],showscale:false,opacity: masses[q]<=0.5 ? 0.35 : masses[q]<=0.9 ? 0.22 : masses[q]<=0.99 ? 0.13 : 0.08,hoverinfo:"skip",lighting:{ambient:0.8,diffuse:0.5,specular:0.1},name:"density"}); });
+    } else { const z=[]; for(let j=0;j<G;j++) z.push(Array.from(grid.val.subarray(j*G,(j+1)*G)));
+      lv.forEach((L,q)=>{ if(!(L>0)) return; traces.push({type:"contour",x:coords(0),y:coords(1),z,autocontour:false,contours:{coloring:"none",start:L,end:L,size:1,showlabels:false},
+        line:{color:col,width:[2.2,1.6,1.1,0.8][Math.min(q,3)],dash:["solid","solid","dash","dot"][Math.min(q,3)]},showscale:false,showlegend:false,hoverinfo:"skip",name:"density"}); }); }
+  });
+  return {traces, note:note+` · density ${three?"surfaces":"curves"} enclose ${masses.map(m=>(100*m)+" %").join(", ")} of the model's mass in this projection`};
+}
 function draw3d(){
-  const v=V[cur], ax=[+$("ax0").value,+$("ax1").value,+$("ax2").value], cm=$("colour").value;
-
+  const v=V[cur], cm=$("colour").value, three = $("ax2").value!=="-1";
+  const ax = three ? [+$("ax0").value,+$("ax1").value,+$("ax2").value] : [+$("ax0").value,+$("ax1").value], nd=ax.length, T=three?"scatter3d":"scattergl";
+  if(lastThree!==three){ Plotly.purge("plot"); lastThree=three; }
   const r=compute(); lastOut=r;
   const only=$("only").checked, hl=$("hl").checked, sc=v.scores[$("score").value], xe=extraOf(cm);
-  const px=[],py=[],pz=[],pc=[],cd=[], ox=[],oy=[],oz=[],ocd=[];
+  const P=[[],[],[]], O=[[],[],[]], pc=[], cd=[], ocd=[];
   for(let i=0;i<N;i++){
     if(!r.shown[i]) continue; const b=i*D, isOut=r.out[i]===1;
-    if(isOut && (hl||only)){ ox.push(X[b+ax[0]]);oy.push(X[b+ax[1]]);oz.push(X[b+ax[2]]); ocd.push([i,v.S[v.sid[i]].label,sc[i]]); if(hl) continue; }
+    if(isOut && (hl||only)){ for(let a=0;a<nd;a++) O[a].push(X[b+ax[a]]); ocd.push([i,v.S[v.sid[i]].label,sc[i]]); if(hl) continue; }
     if(only) continue;
-    px.push(X[b+ax[0]]);py.push(X[b+ax[1]]);pz.push(X[b+ax[2]]); cd.push([i,v.S[v.sid[i]].label,sc[i]]);
+    for(let a=0;a<nd;a++) P[a].push(X[b+ax[a]]); cd.push([i,v.S[v.sid[i]].label,sc[i]]);
     if(cm==="structure") pc.push(v.S[v.sid[i]].colour); else if(cm==="dim") pc.push(DIMCOL[Math.min(v.S[v.sid[i]].dim,8)]);
     else if(xe) pc.push(xe.kind==="num" ? xe.values[i] : (xe.values[i]<0 ? "#b9b8b2" : colourOf(xe.values[i]))); else pc.push(v.scores[cm][i]);
   }
-  const traces=[];
+  const traces=[], put=(t,A)=>{ t.x=A[0]; t.y=A[1]; if(three) t.z=A[2]; return t; };
   const ht="row %{customdata[0]} · %{customdata[1]}<br>score %{customdata[2]:.4g}<extra></extra>";
-  if($("showpts").checked && px.length){
-    const marker={size:+$("psize").value, opacity:+$("popac").value, color:pc, line:{width:0}};
+  const dens=densityTraces(ax);
+  if(!three) dens.traces.forEach(t=>traces.push(t));
+  if($("showpts").checked && P[0].length){
+    const marker={size:+$("psize").value+(three?0:1), opacity:+$("popac").value, color:pc, line:{width:0}};
     if(cm!=="structure" && cm!=="dim" && !(xe && xe.kind==="cat")){ const rg=seqColour(pc); Object.assign(marker,{colorscale:"Blues",reversescale:true,cmin:rg.cmin,cmax:rg.cmax,
       colorbar:{title:{text: xe ? xe.name : DATA.scores.find(s=>s.key===cm).label,side:"right"},thickness:12,len:0.6}}); }
-    traces.push({type:"scatter3d",mode:"markers",x:px,y:py,z:pz,customdata:cd,hovertemplate:ht,marker,name:"points",showlegend:false});
+    traces.push(put({type:T,mode:"markers",customdata:cd,hovertemplate:ht,marker,name:"points",showlegend:false},P));
   }
   if($("showgraphs").checked){
     const done=new Set();
     v.S.forEach(s=>{ if(!s.on||s.kind==="group") return; const g=v.S[s.graph_of]; if(done.has(g.id)||!g.n_nodes) return; done.add(g.id);
-      const E=g.edges, P=g.nodes, n=E.length/2, gx=new Array(3*n), gy=new Array(3*n), gz=new Array(3*n);
-      for(let e=0;e<n;e++){ const a=E[2*e]*D, b=E[2*e+1]*D; gx[3*e]=P[a+ax[0]];gx[3*e+1]=P[b+ax[0]];gx[3*e+2]=null; gy[3*e]=P[a+ax[1]];gy[3*e+1]=P[b+ax[1]];gy[3*e+2]=null; gz[3*e]=P[a+ax[2]];gz[3*e+1]=P[b+ax[2]];gz[3*e+2]=null; }
-      traces.push({type:"scatter3d",mode:"lines",x:gx,y:gy,z:gz,line:{color: cm==="structure"? (s.kind==="residual"? s.colour : g.colour) : "#0b0b0b", width:3},hoverinfo:"skip",name:"graph "+g.label,showlegend:false}); });
+      const E=g.edges, Q=g.nodes, n=E.length/2, L=[new Array(3*n),new Array(3*n),new Array(3*n)];
+      for(let e=0;e<n;e++){ const a=E[2*e]*D, b=E[2*e+1]*D; for(let q=0;q<nd;q++){ L[q][3*e]=Q[a+ax[q]]; L[q][3*e+1]=Q[b+ax[q]]; L[q][3*e+2]=null; } }
+      traces.push(put({type:T,mode:"lines",line:{color: cm==="structure"? (s.kind==="residual"? s.colour : g.colour) : "#0b0b0b", width:three?3:1.2},hoverinfo:"skip",name:"graph "+g.label,showlegend:false},L)); });
   }
-  if(ox.length) traces.push({type:"scatter3d",mode:"markers",x:ox,y:oy,z:oz,customdata:ocd,hovertemplate:ht,marker:{size:+$("psize").value+2.5,color:"#e34948",symbol:"diamond",line:{color:"#ffffff",width:0.5}},name:"outliers",showlegend:false});
+  if(three) dens.traces.forEach(t=>traces.push(t));
+  if(O[0].length) traces.push(put({type:T,mode:"markers",customdata:ocd,hovertemplate:ht,marker:{size:+$("psize").value+(three?2.5:5),color:"#e34948",symbol:"diamond",line:{color:"#ffffff",width:0.5}},name:"outliers",showlegend:false},O));
   const axis=t=>({title:{text:t},backgroundcolor:"#ffffff",gridcolor:"#dddcd6",zerolinecolor:"#dddcd6",color:"#52514e"});
-  Plotly.react("plot", traces, {margin:{l:0,r:0,t:0,b:0},paper_bgcolor:"#fcfcfb",uirevision:"keep",
-    scene:{aspectmode:"data",xaxis:axis(DATA.names[ax[0]]),yaxis:axis(DATA.names[ax[1]]),zaxis:axis(DATA.names[ax[2]]),uirevision:"keep"}},
-    {displaylogo:false,responsive:true});
+  const layout = three ? {margin:{l:0,r:0,t:0,b:0},paper_bgcolor:"#fcfcfb",uirevision:"keep3",scene:{aspectmode:"data",xaxis:axis(DATA.names[ax[0]]),yaxis:axis(DATA.names[ax[1]]),zaxis:axis(DATA.names[ax[2]]),uirevision:"keep3"}}
+    : {margin:{l:60,r:20,t:10,b:50},paper_bgcolor:"#fcfcfb",plot_bgcolor:"#ffffff",uirevision:"keep2",dragmode:"pan",xaxis:{title:{text:DATA.names[ax[0]]},gridcolor:"#eeede8",zeroline:false},yaxis:{title:{text:DATA.names[ax[1]]},gridcolor:"#eeede8",zeroline:false,scaleanchor:"x"}};
+  Plotly.react("plot", traces, layout, {displaylogo:false,responsive:true,scrollZoom:!three});
   $("outinfo").innerHTML = `<b>${r.nout.toLocaleString()}</b> outliers among ${r.nshown.toLocaleString()} shown points (${r.nshown? (100*r.nout/r.nshown).toFixed(2):"0"} %)<br><span class="kind">${scoreMeta().low?"low":"high"} values are outliers · ${r.info}</span>`;
-  $("status").textContent = `${v.name} · ${r.nshown.toLocaleString()} of ${N.toLocaleString()} points shown · drag to rotate, scroll to zoom, right-drag to pan`;
+  $("status").textContent = `${v.name} · ${r.nshown.toLocaleString()} of ${N.toLocaleString()} points shown${dens.note} · ${three?"drag to rotate, scroll to zoom":"drag to pan, scroll to zoom"}`;
 }
 function download(onlyOut){
   const v=V[cur], r=lastOut||compute(); const keys=DATA.scores.map(s=>s.key);
@@ -574,7 +639,8 @@ $("top").onclick=()=>setAll(s=>s.kind==="residual");
 $("version").onchange=()=>{ cur=+$("version").value; buildTree(); fillGraphSelect(); setThrRange(); draw(); };
 document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 refreshExtraOptions();
-["gstruct","gcolour","gpts","gy","gedge","gproj","gsize"].forEach(id=>$(id).addEventListener("input",draw));
+["gstruct","gcolour","gpts","gy","gedge","gproj","gsize","isomode","isores"].forEach(id=>$(id).addEventListener("input",draw));
+document.querySelectorAll(".isolvl").forEach(e=>e.addEventListener("change",draw));
 $("xfile").addEventListener("change",ev=>{ const f=ev.target.files[0]; if(!f) return; const rd=new FileReader();
   rd.onload=()=>{ try{ loadExtraText(String(rd.result), f.name); }catch(err){ $("xinfo").textContent="Could not use "+f.name+": "+err.message; } };
   rd.readAsText(f); });
