@@ -278,7 +278,11 @@ _TEMPLATE = r"""<!doctype html>
 *{box-sizing:border-box}html,body{height:100%;margin:0}
 body{font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);background:var(--bg);display:flex}
 #side{width:350px;min-width:350px;height:100%;overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:12px 14px}
-#main{flex:1;min-width:0;height:100%;display:flex;flex-direction:column;overflow:hidden}
+#main{flex:1;min-width:0;height:100%;display:flex;flex-direction:column;overflow:hidden;position:relative}
+#loc{position:absolute;left:12px;bottom:42px;width:340px;height:300px;z-index:3;background:#ffffff;border:1px solid var(--line);border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.12);overflow:hidden}
+#loc.big{width:620px;height:520px}#loc.off{display:none}
+#lochead{height:24px;line-height:24px;padding:0 8px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;cursor:pointer;user-select:none}
+#locplot{position:absolute;top:25px;left:0;right:0;bottom:0}
 #plot{flex:1 1 0;min-height:0;height:0;overflow:hidden;position:relative}
 #status{flex:none;height:30px;line-height:18px;background:var(--bg);position:relative;z-index:2;padding:6px 12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 h1{font-size:15px;margin:0 0 8px}h2{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 6px}
@@ -327,6 +331,7 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <label for="gy">Vertical axis (curves)</label><select id="gy"></select>
   <label class="check"><input type="checkbox" id="gpts" checked> points of the structure</label>
   <label class="check"><input type="checkbox" id="gfill" checked> fill the structure (points at their own position)</label>
+  <label class="check"><input type="checkbox" id="gloc" checked> locator: where the structure sits in the data</label>
   <p class="hint">Each structure is drawn in its own dimension, unfolded along its graph (geodesic distances along the edges): a curve as a line with a profile above it, a surface in the plane, a 3-D structure in space, a 4-D one through 3-D projections. Points are drawn at their own position within the structure (their offset from the nearest node, along the structure, carried into the layout); untick "fill the structure" to snap them onto the nearest edge instead.</p>
   </div>
   <h2>Structures</h2>
@@ -362,7 +367,8 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <details><summary>Model summary of this version</summary><pre id="summary"></pre></details>
 </div>
 <div id="main"><div id="tabs"><button class="tab active" data-view="3d">3-D view</button><button class="tab" data-view="graph">Graph view (one structure, unfolded)</button></div>
-<div id="plot"></div><div id="status"></div></div>
+<div id="plot"></div><div id="status"></div>
+<div id="loc" class="viewonly onlygraph"><div id="lochead" title="click to enlarge or shrink"><span id="loctitle"></span><span>&#x2922;</span></div><div id="locplot"></div></div></div>
 <script>
 const DATA = /*__DATA__*/;
 const PAL = ["#2a78d6","#eb6834","#1baf7a","#eda100","#e87ba4","#008300","#6250d6","#e34948"];
@@ -597,8 +603,26 @@ function drawGraph(){
     else layout={xaxis:{visible:false},yaxis:{visible:false,scaleanchor:"x"},margin:{l:10,r:90,t:10,b:10},dragmode:"pan"};
   }
   Plotly.react("plot", traces, Object.assign({paper_bgcolor:"#fcfcfb",plot_bgcolor:"#ffffff",uirevision:"g"+cur+"-"+sidSel+"-"+$("gproj").value},layout), {displaylogo:false,responsive:true,scrollZoom:true});
+  drawLocator(v,s,idx,r);
   $("outinfo").innerHTML = `<b>${r.nout.toLocaleString()}</b> outliers among ${r.nshown.toLocaleString()} points of this structure (${r.nshown? (100*r.nout/r.nshown).toFixed(2):"0"} %)<br><span class="kind">${meta.low?"low":"high"} values are outliers · ${Number.isFinite(cut)? "cut at "+cut.toPrecision(4) : r.info}</span>`;
   $("status").textContent = `${v.name} · structure ${s.label}: ${s.dim}-D, ${K} nodes, ${n} edges, ${idx.length.toLocaleString()} points · ${kind}`;
+}
+function drawLocator(v,s,idx,r){
+  // inset: the selected structure among all the data, on the features chosen under "View"
+  const box=$("loc"); box.classList.toggle("off", !$("gloc").checked); if(!$("gloc").checked) return;
+  const three=$("ax2").value!=="-1", ax = three ? [+$("ax0").value,+$("ax1").value,+$("ax2").value] : [+$("ax0").value,+$("ax1").value], nd=ax.length, T=three?"scatter3d":"scattergl";
+  if(box.dataset.three!==String(three)){ Plotly.purge("locplot"); box.dataset.three=String(three); }
+  const mk=()=>ax.map(()=>[]), B=mk(), S=mk(), O=mk(), bstep=Math.max(1,Math.ceil(N/8000)), sstep=Math.max(1,Math.ceil(idx.length/6000));
+  for(let i=0;i<N;i+=bstep){ if(v.sid[i]===s.id) continue; for(let a=0;a<nd;a++) B[a].push(X[i*D+ax[a]]); }
+  idx.forEach((i,q)=>{ if(r.out[i]){ for(let a=0;a<nd;a++) O[a].push(X[i*D+ax[a]]); } else if(q%sstep===0){ for(let a=0;a<nd;a++) S[a].push(X[i*D+ax[a]]); } });
+  const tr=(C,marker)=>{ const t={type:T,mode:"markers",x:C[0],y:C[1],marker,hoverinfo:"skip",showlegend:false}; if(three) t.z=C[2]; return t; };
+  const traces=[tr(B,{size:three?1.2:2,color:"#c9c8c2",opacity:three?0.35:0.4,line:{width:0}}), tr(S,{size:three?2:3,color:s.colour,opacity:0.9,line:{width:0}})];
+  if(O[0].length) traces.push(tr(O,{size:three?2.2:5,color:"#e34948",symbol:"diamond",line:{width:0}}));
+  const axn=a=>({title:{text:DATA.names[ax[a]],font:{size:10}},tickfont:{size:8},backgroundcolor:"#ffffff",gridcolor:"#eeede8",zerolinecolor:"#eeede8",color:"#52514e"});
+  const layout = three ? {scene:{aspectmode:"data",xaxis:axn(0),yaxis:axn(1),zaxis:axn(2)},margin:{l:0,r:0,t:0,b:0}}
+    : {xaxis:Object.assign(axn(0),{zeroline:false}),yaxis:Object.assign(axn(1),{zeroline:false,scaleanchor:"x"}),margin:{l:38,r:6,t:6,b:32},dragmode:"pan"};
+  Plotly.react("locplot",traces,Object.assign({paper_bgcolor:"#ffffff",plot_bgcolor:"#ffffff",uirevision:"loc"+three},layout),{displayModeBar:false,responsive:true,scrollZoom:true});
+  $("loctitle").textContent = `structure ${s.label} in the data (${ax.map(a=>DATA.names[a]).join(", ")})`;
 }
 function setView(w){ view=w; document.body.className = w==="graph" ? "vgraph" : "v3d"; document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===w)); Plotly.purge("plot"); lastThree=null; draw(); }
 function triIndex(a,b){ if(a>b){ const t=a;a=b;b=t; } return a*D - (a*(a-1))/2 + (b-a); }
@@ -704,7 +728,7 @@ $("top").onclick=()=>setAll(s=>s.kind==="residual");
 $("version").onchange=()=>{ cur=+$("version").value; buildTree(); fillGraphSelect(); setThrRange(); draw(); };
 document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 refreshExtraOptions();
-["gstruct","gcolour","gpts","gfill","gy","gedge","gproj","gsize","isomode","isores"].forEach(id=>$(id).addEventListener("input",draw));
+["gstruct","gcolour","gpts","gfill","gloc","gy","gedge","gproj","gsize","isomode","isores"].forEach(id=>$(id).addEventListener("input",draw));
 document.querySelectorAll(".isolvl").forEach(e=>e.addEventListener("change",draw));
 $("xfile").addEventListener("change",ev=>{ const f=ev.target.files[0]; if(!f) return; const rd=new FileReader();
   rd.onload=()=>{ try{ loadExtraText(String(rd.result), f.name); }catch(err){ $("xinfo").textContent="Could not use "+f.name+": "+err.message; } };
@@ -717,6 +741,7 @@ $("thr").oninput=()=>{ $("thrnum").value=(+$("thr").value).toPrecision(4); docum
 $("thrnum").oninput=()=>{ $("thr").value=$("thrnum").value; document.querySelector("input[name=mode][value=thr]").checked=true; draw(); };
 document.querySelectorAll("input[name=mode]").forEach(e=>e.addEventListener("change",draw));
 $("csv").onclick=()=>download(true); $("csvall").onclick=()=>download(false);
+$("lochead").addEventListener("click",()=>{ $("loc").classList.toggle("big"); Plotly.Plots.resize("locplot"); });
 document.body.className="v3d"; buildTree(); fillGraphSelect(); setThrRange(); draw();
 </script></body></html>
 """
