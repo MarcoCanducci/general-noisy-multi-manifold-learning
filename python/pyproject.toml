@@ -22,10 +22,10 @@ classifiers = [
 dependencies = ["numpy>=1.23", "scipy>=1.9"]
 
 [project.optional-dependencies]
-viz = ["matplotlib>=3.6", "networkx"]
+viz = ["matplotlib>=3.6", "networkx", "plotly>=5.18"]
 gui = ["matplotlib>=3.6", "panel>=1.4", "pyvista>=0.43", "vtk>=9.2", "plotly>=5.18", "pandas>=1.5", "networkx"]
 io = ["h5py", "astropy", "pandas>=1.5"]
-test = ["pytest", "matplotlib>=3.6", "networkx"]
+test = ["pytest", "matplotlib>=3.6", "networkx", "plotly>=5.18"]
 all = ["examm[viz,gui,io,test]", "networkx"]
 
 [project.scripts]
@@ -50,5 +50,5 @@ testpaths = ["tests"]
 [tool.cibuildwheel]
 build = "cp310-* cp311-* cp312-* cp313-*"
 skip = "*-musllinux_* *_i686"
-test-requires = ["pytest", "matplotlib", "networkx"]
+test-requires = ["pytest", "matplotlib", "networkx", "plotly"]
 test-command = "pytest {project}/python/tests -q -x --ignore={project}/python/tests/test_gui.py"

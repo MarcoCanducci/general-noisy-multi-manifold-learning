@@ -166,6 +166,16 @@ Data with more than three features are shown with `axes=(i, j, k)` (feature indi
 
 ![Filaments](docs/img/filaments.png)
 
+### Interactive viewer
+
+`examm.viewer.export_viewer("viewer.html", X, {"run A": H_a, "run B": H_b}, names=...)` writes
+one self-contained HTML page for one or several fitted hierarchies (no server; plotly.js is
+embedded). It shows the points in 3-D with a choice of the three features, the graphs, a tree
+for switching structures, parents or leaves on and off, and an outlier selector on any of the
+per-point scores (log density, orthogonal distance, its Mahalanobis form and tail probability,
+regional rank, background probability), by percentile or by an explicit threshold, over all
+shown points or within each structure. Selections can be downloaded as CSV.
+
 ## GUI
 
 ```bash
