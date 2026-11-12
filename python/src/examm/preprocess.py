@@ -242,8 +242,15 @@ class Pipeline(Preprocessor):
         self.steps = [resolve(s) for s in steps]
 
     def apply(self, state, r):
+        # the rows left after every step are recorded, so that removals can be attributed to steps
+        trail = list(state.info.get("steps", []))
         for step in self.steps:
             state = step.apply(state, r)
+            if not isinstance(step, Pipeline):
+                trail.append((type(step).__name__, state.indices.copy()))
+            else:
+                trail = list(state.info.get("steps", trail))
+            state.info["steps"] = trail
         return state
 
 

@@ -152,3 +152,23 @@ def test_dimension_labels_follow_the_detection_runs(rng):
     assert v["idxh"] and v["idxs"]
     del H.detections_
     assert _dimension_labels(H, len(X)) is None
+
+
+def test_point_status_accounts_for_every_point(rng):
+    import examm
+    from examm.viewer import _point_status, viewer_payload
+
+    X = np.r_[np.c_[rng.uniform(0, 3, (2500, 2)), rng.normal(0, 0.01, 2500)], rng.uniform(-1, 4, (80, 3))]
+    pre = examm.Pipeline([examm.DensityThin(radius=0.2, target=20, random_state=0), examm.SAF(), examm.DensityFilter()])
+    H = examm.build_hierarchy(X, [0.3], preprocess=[pre], dims=[[1, 2]], random_state=0)
+    L = H.detections_[0]["learner"]
+    assert [n for n, _ in L.preprocess_.info["steps"]] == ["DensityThin", "SAF", "DensityFilter"]
+    status, names, text = _point_status(H, len(X))
+    assert status.min() >= 0 and len(status) == len(X)
+    removed = np.setdiff1d(np.arange(len(X)), L.preprocess_.indices)
+    assert (status[removed] > 0).all()
+    thin = names.index("thinned out (density subsampling)")
+    assert (status == thin).sum() == len(X) - len(L.preprocess_.info["steps"][0][1])
+    assert "used: on a structure's graph" in text
+    v = viewer_payload(X, {"a": H})["versions"][0]
+    assert v["status"] and v["status_names"] == names

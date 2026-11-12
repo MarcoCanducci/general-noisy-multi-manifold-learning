@@ -197,6 +197,75 @@ def _dimension_labels(H, n: int):
     return hard, smooth
 
 
+_STEP_LABELS = {"DensityThin": "thinned out (density subsampling)",
+                "DensityFilter": "removed by the density filter (sparse neighbourhood)"}
+USED = "used: on a structure's graph"
+
+
+def _point_status(H, n: int):
+    """What happened to every point during detection, and how many points each step set aside.
+
+    Read from ``H.detections_``. Returns ``(codes, names, text)``: a status code per point (taken
+    from the first-level runs; a later run on rows an earlier run removed replaces their status),
+    the status names, and a table of counts for every detection run of every level. ``None``
+    when no detection runs are stored. The fitted model still scores every point; the status
+    says whether the point took part in building the structures.
+    """
+    det = getattr(H, "detections_", None)
+    if not det:
+        return None
+    names = [USED]
+
+    def code(name):
+        if name not in names:
+            names.append(name)
+        return names.index(name)
+
+    top = min(d.get("level", 0) for d in det)
+    status = np.full(n, -1, dtype=np.int8)
+    lines = []
+    for d in sorted(det, key=lambda d: d.get("level", 0)):
+        L, region = d["learner"], np.asarray(d["region"])
+        if getattr(L, "dim_result_", None) is None:
+            continue
+        kept = np.asarray(L.preprocess_.indices)
+        st = np.zeros(len(region), dtype=np.int8)
+        rows = [("examined", len(region))]
+        prev = np.arange(len(region))
+        for name, idx in L.preprocess_.info.get("steps") or [("preprocessing", kept)]:
+            gone = np.setdiff1d(prev, idx)
+            if len(gone) or name in _STEP_LABELS:
+                label = _STEP_LABELS.get(name, f"removed by {name}")
+                st[gone] = code(label)
+                rows.append((label, len(gone)))
+            prev = np.asarray(idx)
+        index = np.asarray(L.dim_result_.index)
+        d_amb = L.X_.shape[1]
+        dims = list(range(1, d_amb)) if L.dims is None else [int(j) for j in np.atleast_1d(L.dims)]
+        und = index == 0
+        skipped = ~und & ~np.isin(index, dims)
+        on = np.zeros(len(kept), dtype=bool)
+        for gs in getattr(L, "graphs_", {}).values():
+            for g in gs:
+                on[np.asarray(g.points, dtype=np.int64)] = True
+        loose = ~und & ~skipped & ~on
+        for mask, label in ((und, "dimensionality undetermined (too few neighbours)"),
+                            (skipped, "estimated dimension not modelled"),
+                            (loose, "not reached by any graph")):
+            st[kept[mask]] = code(label)
+            rows.append((label, int(mask.sum())))
+        rows.append((USED, int((st == 0).sum())))
+        if d.get("level", 0) == top:
+            status[region] = st
+        lines.append(f"level {d.get('level', '?')}, inside {d.get('parent', '?')}, r = {d.get('r', L.r):g}")
+        lines += [f"  {c:>7,d}  {label}" for label, c in rows]
+    if (status < 0).any():
+        status[status < 0] = code("not examined")
+    cnt = np.bincount(status, minlength=len(names))
+    head = ["All points, after the first level:"] + [f"  {c:>7,d}  {nm}" for nm, c in zip(names, cnt) if c] + ["", "Every detection run:"]
+    return status, names, "\n".join(head + lines)
+
+
 def _version_payload(H, X, hops: int, min_region: int) -> dict:
     res = H.regional_deviation(X, hops=hops, min_region=min_region)
     leaves = H.leaves()
@@ -266,7 +335,11 @@ def _version_payload(H, X, hops: int, min_region: int) -> dict:
     for s in structures:
         s["points"] = int(counts[s["id"]])
     idx = _dimension_labels(H, len(X))
+    stat = _point_status(H, len(X))
     return {
+        "status": _b64(stat[0], np.int8) if stat else "",
+        "status_names": stat[1] if stat else [],
+        "discarded": stat[2] if stat else "No detection runs are stored for this version.",
         "idxh": _b64(idx[0], np.int8) if idx else "",
         "idxs": _b64(idx[1], np.int8) if idx else "",
         "structures": structures,
@@ -442,7 +515,18 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <label class="check"><input type="checkbox" id="only"> show outliers only</label>
   <div id="outinfo"></div>
   <div class="row tight" style="margin-top:6px"><button id="csv">Download outliers (CSV)</button><button id="csvall">Download shown points (CSV)</button></div>
+  <details><summary>Points set aside at each step</summary><pre id="discarded"></pre></details>
   <details><summary>Model summary of this version</summary><pre id="summary"></pre></details>
+  <h2>Table of all criteria</h2>
+  <p class="hint">One line for every point of the data set (not only the shown or selected ones), with its status in the analysis and the criteria ticked here.</p>
+  <div id="tabcrit"></div>
+  <label class="check"><input type="checkbox" id="tabstruct" checked> structure, node and estimated dimensionality</label>
+  <label class="check"><input type="checkbox" id="tabsel" checked> current selection (outlier yes/no)</label>
+  <label class="check"><input type="checkbox" id="tabx"> coordinates</label>
+  <label class="check"><input type="checkbox" id="tabextra"> extra labels</label>
+  <p class="hint" style="margin-top:6px">Write NaN in the criteria of points with status:</p>
+  <div id="tabnan"></div>
+  <div class="row tight" style="margin-top:6px"><button id="tabdl">Download table, all points (CSV)</button></div>
 </div>
 <div id="main"><div id="tabs"><button class="tab active" data-view="3d">3-D view</button><button class="tab" data-view="graph">Graph view (one structure, unfolded)</button></div>
 <div id="plot"></div><div id="status"></div>
@@ -456,6 +540,7 @@ function colourOf(i){ if(i<PAL.length) return PAL[i]; const h=(i*137.508)%360; r
 const N=DATA.n, D=DATA.d, X=dec(DATA.X, Float32Array);
 const V = DATA.versions.map(v => ({name:v.name, summary:v.summary, sid:dec(v.sid,Int16Array), node:dec(v.node,Int32Array),
   toward:dec(v.toward,Int32Array), frac:dec(v.frac,Float32Array), ppos: v.ppos ? dec(v.ppos,Float32Array) : null, ppos2: v.ppos2 ? dec(v.ppos2,Float32Array) : null,
+  status: v.status ? dec(v.status,Int8Array) : null, status_names: v.status_names||[], discarded: v.discarded||"",
   idxh: v.idxh ? dec(v.idxh,Int8Array) : null, idxs: v.idxs ? dec(v.idxs,Int8Array) : null,
   scores:Object.fromEntries(Object.entries(v.scores).map(([k,b])=>[k,dec(b,Float32Array)])),
   S:v.structures.map(s=>({...s, nodes:dec(s.nodes,Float32Array), edges:dec(s.edges,Int32Array), emb:dec(s.emb,Float32Array), emb2: s.emb2 ? dec(s.emb2,Float32Array) : null, arc:dec(s.arc,Float32Array), curv:dec(s.curv,Float32Array), zeta:dec(s.zeta,Float32Array), degen:dec(s.degen,Float32Array), noise:dec(s.noise,Float32Array), cov:dec(s.cov,Float32Array), on:s.kind!=="group", colour:colourOf(s.id)}))}));
@@ -522,7 +607,9 @@ function buildTree(){
     children(v,s.id).forEach(c=>add(c,depth+1));
   };
   children(v,-1).forEach(s=>add(s,0));
-  $("summary").textContent=v.summary;
+  $("summary").textContent=v.summary; $("discarded").textContent=v.discarded;
+  const nb=$("tabnan"); nb.innerHTML=""; v.status_names.forEach((t,k)=>{ if(k===0) return; const l=document.createElement("label"); l.className="check"; const c=document.createElement("input"); c.type="checkbox"; c.dataset.code=k; c.checked=!t.startsWith("thinned"); l.append(c," "+t); nb.appendChild(l); });
+  if(!v.status) nb.textContent="(no status stored for this version)";
 }
 function leafStates(v,s){ return s.kind==="group" ? children(v,s.id).flatMap(c=>leafStates(v,c)) : [s.on]; }
 function subtreePoints(v,s){ return s.kind==="group" ? children(v,s.id).reduce((a,c)=>a+subtreePoints(v,c),0) : s.points; }
@@ -815,6 +902,22 @@ function download(onlyOut){
     rows.push([i,'"'+s.label+'"',s.dim,v.node[i],r.out[i],...keys.map(k=>v.scores[k][i]),...xs].join(",")); }
   const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([rows.join("\n")],{type:"text/csv"})); a.download=(onlyOut?"outliers":"points")+".csv"; a.click(); URL.revokeObjectURL(a.href);
 }
+function downloadTable(){
+  const v=V[cur], r=lastOut||compute(), keys=[...document.querySelectorAll("#tabcrit input:checked")].map(e=>e.value);
+  const nan=new Set([...document.querySelectorAll("#tabnan input:checked")].map(e=>+e.dataset.code));
+  const ws=$("tabstruct").checked, wsel=$("tabsel").checked, wx=$("tabx").checked, we=$("tabextra").checked, q=t=>'"'+String(t).replace(/"/g,'""')+'"';
+  const head=["row","status"]; if(ws) head.push("structure","structure_dim","node","dim_index_raw","dim_index_smoothed"); if(wsel) head.push("shown","selected_outlier");
+  keys.forEach(k=>head.push(k)); if(wx) DATA.names.forEach(t=>head.push(q(t))); if(we) EXTRA.forEach(e=>head.push(q(e.name)));
+  const rows=[head.join(",")];
+  for(let i=0;i<N;i++){ const st=v.status? v.status[i] : -1, blank=nan.has(st), s=v.S[v.sid[i]], c=[i, q(st<0? "unknown" : v.status_names[st])];
+    if(ws) c.push(s? q(s.label):"", s? s.dim:"", v.node[i], v.idxh? v.idxh[i]:"", v.idxs? v.idxs[i]:"");
+    if(wsel) c.push(r.shown[i]?1:0, r.out[i]?1:0);
+    keys.forEach(k=>{ const t=v.scores[k][i]; c.push(blank||!Number.isFinite(t) ? "NaN" : t); });
+    if(wx) for(let k=0;k<D;k++) c.push(X[i*D+k].toPrecision(7));
+    if(we) EXTRA.forEach(e=>c.push(e.kind==="num" ? (Number.isFinite(e.values[i])? e.values[i] : "NaN") : (e.values[i]<0? "" : q(e.cats[e.values[i]]))));
+    rows.push(c.join(",")); }
+  const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([rows.join("\n")],{type:"text/csv"})); a.download="criteria_all_points.csv"; a.click(); URL.revokeObjectURL(a.href);
+}
 function setAll(fn){ const v=V[cur]; v.S.forEach(s=>{ s.on=fn(s,v); }); syncParents(v); buildTree(); draw(); }
 $("all").onclick=()=>setAll(()=>true); $("none").onclick=()=>setAll(()=>false);
 $("leavesonly").onclick=()=>setAll(s=>s.kind==="leaf");
@@ -834,6 +937,8 @@ $("pctnum").oninput=()=>{ $("pct").value=$("pctnum").value; document.querySelect
 $("thr").oninput=()=>{ $("thrnum").value=(+$("thr").value).toPrecision(4); document.querySelector("input[name=mode][value=thr]").checked=true; draw(); };
 $("thrnum").oninput=()=>{ $("thr").value=$("thrnum").value; document.querySelector("input[name=mode][value=thr]").checked=true; draw(); };
 document.querySelectorAll("input[name=mode]").forEach(e=>e.addEventListener("change",draw));
+DATA.scores.forEach(s=>{ const l=document.createElement("label"); l.className="check"; const c=document.createElement("input"); c.type="checkbox"; c.value=s.key; c.checked=true; l.append(c," "+s.label+" ["+s.key+"]"); $("tabcrit").appendChild(l); });
+$("tabdl").onclick=downloadTable;
 $("csv").onclick=()=>download(true); $("csvall").onclick=()=>download(false);
 $("lochead").addEventListener("click",()=>{ $("loc").classList.toggle("big"); Plotly.Plots.resize("locplot"); });
 document.body.className="v3d"; buildTree(); fillGraphSelect(); setThrRange(); draw();
