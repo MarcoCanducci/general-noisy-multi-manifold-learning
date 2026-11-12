@@ -279,6 +279,62 @@ def _point_status(H, n: int):
     return status, names, "\n".join(head + lines)
 
 
+def _rigid_fit(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
+    """``src`` turned (and mirrored if needed) and shifted onto ``dst`` in the least-squares sense."""
+    a, b = src - src.mean(0), dst - dst.mean(0)
+    U, _, Vt = np.linalg.svd(a.T @ b)
+    return a @ (U @ Vt) + dst.mean(0)
+
+
+def _topology(X, items, max_landmarks: int = 500) -> dict:
+    """Layout of the whole mixture of graphs for the topology page.
+
+    ``items`` holds, per graph that owns points: its structure id, node means, edges, the rows of
+    its points and its own planar unfolding (nodes and points, through its data points).
+    All graphs and all points are also unfolded together (one landmark Isomap through the whole
+    point cloud), which gives every graph a position and orientation relative to the others.
+    For both layouts the coordinates are stored relative to the graph's centre, so the page can
+    move and turn graphs as rigid pieces. Pairs of graphs in contact (nodes of one within 1.5
+    local edge lengths of a node of the other) are listed with the nodes involved.
+    """
+    from scipy.spatial import cKDTree
+
+    n = len(X)
+    out = {"islands": [], "links": [], "pj": "", "pi": "", "pisl": ""}
+    if not items:
+        return out
+    off = np.cumsum([0] + [len(it["means"]) for it in items])
+    P = np.vstack([it["means"] for it in items])
+    E = np.vstack([np.asarray(it["edges"], dtype=np.int64).reshape(-1, 2) + off[k] for k, it in enumerate(items)])
+    jn, jp = _cloud_embedding(P, E, X, 2, max_landmarks=max_landmarks)
+    pj, pi = np.zeros((n, 2), dtype=np.float32), np.zeros((n, 2), dtype=np.float32)
+    pisl = np.full(n, -1, dtype=np.int16)
+    el = []
+    for k, it in enumerate(items):
+        rows = it["rows"]
+        target = np.vstack([jn[off[k]:off[k + 1]], jp[rows]])
+        c = target.mean(0)
+        own = _rigid_fit(np.vstack([it["own_nodes"], it["own_points"]]), target)
+        K = len(it["means"])
+        pj[rows], pi[rows], pisl[rows] = target[K:] - c, own[K:] - c, k
+        out["islands"].append({"g": int(it["g"]), "c": [float(c[0]), float(c[1])],
+                               "nj": _b64(target[:K] - c, np.float32), "ni": _b64(own[:K] - c, np.float32)})
+        e = np.asarray(it["edges"], dtype=np.int64).reshape(-1, 2)
+        el.append(np.median(np.linalg.norm(it["means"][e[:, 0]] - it["means"][e[:, 1]], axis=1)) if len(e) else 0.0)
+    el = np.array(el)
+    el[el <= 0] = np.median(el[el > 0]) if (el > 0).any() else 1.0
+    trees = [cKDTree(it["means"]) for it in items]
+    for a in range(len(items)):
+        for b in range(a + 1, len(items)):
+            d, j = trees[b].query(items[a]["means"])
+            ok = d < 1.5 * max(el[a], el[b])
+            if ok.any():
+                out["links"].append({"a": a, "b": b, "n": int(ok.sum()), "ia": _b64(np.flatnonzero(ok), np.int32),
+                                     "ib": _b64(np.unique(j[ok]), np.int32)})
+    out.update(pj=_b64(pj, np.float32), pi=_b64(pi, np.float32), pisl=_b64(pisl, np.int16))
+    return out
+
+
 def _version_payload(H, X, hops: int, min_region: int) -> dict:
     res = H.regional_deviation(X, hops=hops, min_region=min_region)
     leaves = H.leaves()
@@ -333,6 +389,7 @@ def _version_payload(H, X, hops: int, min_region: int) -> dict:
             collect(c)
 
     collect(H.root_)
+    items = []
     for g_, model in models.items():
         rows = np.flatnonzero(gid == g_)
         if len(rows) == 0:
@@ -344,6 +401,10 @@ def _version_payload(H, X, hops: int, min_region: int) -> dict:
             e2, p2 = _cloud_embedding(model.means_, model.graph.edges, X[rows], int(model.graph.dim))
             structures[g_]["emb2"] = _b64(e2, np.float32)
             ppos2[rows, :p2.shape[1]] = p2
+        else:
+            e2, p2 = _cloud_embedding(model.means_, model.graph.edges, X[rows], 2)
+        items.append({"g": g_, "means": model.means_, "edges": model.graph.edges, "rows": rows,
+                      "own_nodes": e2[:, :2], "own_points": p2[:, :2]})
     counts = np.bincount(sid[sid >= 0], minlength=len(structures))
     for s in structures:
         s["points"] = int(counts[s["id"]])
@@ -362,6 +423,7 @@ def _version_payload(H, X, hops: int, min_region: int) -> dict:
         "frac": _b64(res["fraction"], np.float32),
         "ppos": _b64(ppos, np.float32),
         "ppos2": _b64(ppos2, np.float32),
+        "topo": _topology(X, items),
         "scores": {"logdens": _b64(H.score_samples(X), np.float32), "dist": _b64(res["distance"], np.float32),
                    "d2": _b64(res["d2"], np.float32), "pval": _b64(res["p_value"], np.float32),
                    "rank": _b64(res["regional_rank"], np.float32), "bg": _b64(res["background_probability"], np.float32)},
@@ -463,7 +525,8 @@ button:hover{border-color:var(--accent)}
 .infobox{display:none;position:fixed;left:16px;top:44px;width:310px;max-height:calc(100vh - 80px);overflow:auto;z-index:20;background:#ffffff;color:#0b0b0b;border:1px solid var(--line);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:10px 12px;text-align:left;font-weight:400;font-size:11.5px;line-height:1.45;cursor:default}
 .info:hover .infobox,.info:focus .infobox{display:block}.infobox b{display:block;margin-top:6px}.infobox b:first-child{margin-top:0}
 #catlegend{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:4px;font-size:11px}#catlegend span{display:flex;align-items:center;gap:4px}
-.viewonly{display:none}body.v3d .only3d{display:block}body.vgraph .onlygraph{display:block}
+.viewonly{display:none}body.v3d .only3d{display:block}body.vgraph .onlygraph{display:block}body.vtopo .onlytopo{display:block}
+#topo{display:none;flex:1 1 0;min-height:0;width:100%;background:#ffffff;cursor:grab;touch-action:none}body.vtopo #topo{display:block}body.vtopo #plot{display:none}
 #tree{border:1px solid var(--line);border-radius:4px;background:#fff;max-height:300px;overflow:auto;padding:4px 0}
 .node{display:flex;align-items:center;gap:5px;padding:1px 6px;white-space:nowrap;cursor:default}
 .node:hover{background:#f1f5fb}.node input{margin:0}
@@ -487,6 +550,19 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <div><label for="popac">Opacity</label><input id="popac" type="range" min="0.1" max="1" step="0.05" value="0.7"></div></div>
   <label class="check"><input type="checkbox" id="showpts" checked> points</label>
   <label class="check"><input type="checkbox" id="showgraphs" checked> graphs of the selected structures</label>
+  <div class="viewonly onlytopo">
+  <h2>Topology</h2>
+  <label for="tmode">Layout</label><select id="tmode"><option value="isl">islands: each structure in its own unfolding</option><option value="joint">joint: everything unfolded together</option></select>
+  <label for="tsep">Pull the structures apart</label><input id="tsep" type="range" min="0" max="1" step="0.01" value="1">
+  <label for="trot">Turn the whole view</label><input id="trot" type="range" min="-180" max="180" step="1" value="0">
+  <label for="tlink">Hide links with fewer contacts than <span id="tlinkv">1</span></label><input id="tlink" type="range" min="1" max="50" step="1" value="1">
+  <label for="tnode">Colour nodes by</label><select id="tnode"></select>
+  <label class="check"><input type="checkbox" id="tpts" checked> data points</label>
+  <label class="check"><input type="checkbox" id="tlinks" checked> links between structures in contact</label>
+  <label class="check"><input type="checkbox" id="tlabels" checked> labels and outlines</label>
+  <div class="row tight" style="margin-top:6px"><button id="treset">Reset arrangement</button><button id="tfit">Fit to window</button><button id="tpng">Save picture</button></div>
+  <p class="hint">Drag a structure to move it, Shift-drag to turn it, press F over it to mirror it. Drag the background to pan, use the wheel to zoom, double-click a structure to open its graph page. Both layouts are unfolded through the original data points: "islands" draws every structure exactly as on the graph page, placed and oriented as in the joint unfolding; "joint" unfolds all structures and all points together, so structures that run through each other overlap. A link joins two structures that have nodes within 1.5 edge lengths of each other; its width is the number of such nodes. Your arrangement is remembered in this browser.</p>
+  </div>
   <div class="viewonly onlygraph">
   <h2>Graph view</h2>
   <label for="gstruct">Structure</label><select id="gstruct"></select>
@@ -544,8 +620,8 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <div id="tabnan"></div>
   <div class="row tight" style="margin-top:6px"><button id="tabdl">Download table, all points (CSV)</button></div>
 </div>
-<div id="main"><div id="tabs"><button class="tab active" data-view="3d">3-D view</button><button class="tab" data-view="graph">Graph view (one structure, unfolded)</button></div>
-<div id="plot"></div><div id="status"></div>
+<div id="main"><div id="tabs"><button class="tab active" data-view="3d">3-D view</button><button class="tab" data-view="graph">Graph view (one structure, unfolded)</button><button class="tab" data-view="topo">Topology (all structures)</button></div>
+<div id="plot"></div><canvas id="topo"></canvas><div id="status"></div>
 <div id="loc" class="viewonly onlygraph"><div id="lochead" title="click to enlarge or shrink"><span id="loctitle"></span><span>&#x2922;</span></div><div id="locplot"></div></div></div>
 <script>
 const DATA = /*__DATA__*/;
@@ -557,6 +633,9 @@ const N=DATA.n, D=DATA.d, X=dec(DATA.X, Float32Array);
 const V = DATA.versions.map(v => ({name:v.name, summary:v.summary, sid:dec(v.sid,Int16Array), node:dec(v.node,Int32Array),
   toward:dec(v.toward,Int32Array), frac:dec(v.frac,Float32Array), ppos: v.ppos ? dec(v.ppos,Float32Array) : null, ppos2: v.ppos2 ? dec(v.ppos2,Float32Array) : null,
   status: v.status ? dec(v.status,Int8Array) : null, status_names: v.status_names||[], discarded: v.discarded||"",
+  topo: v.topo && v.topo.islands && v.topo.islands.length ? {pj:dec(v.topo.pj,Float32Array), pi:dec(v.topo.pi,Float32Array), pisl:dec(v.topo.pisl,Int16Array),
+    isl:v.topo.islands.map(t=>({g:t.g, c:t.c, nj:dec(t.nj,Float32Array), ni:dec(t.ni,Float32Array), dx:0, dy:0, rot:0, flip:1})),
+    links:v.topo.links.map(l=>({a:l.a,b:l.b,n:l.n,ia:dec(l.ia,Int32Array),ib:dec(l.ib,Int32Array)}))} : null,
   idxh: v.idxh ? dec(v.idxh,Int8Array) : null, idxs: v.idxs ? dec(v.idxs,Int8Array) : null,
   scores:Object.fromEntries(Object.entries(v.scores).map(([k,b])=>[k,dec(b,Float32Array)])),
   S:v.structures.map(s=>({...s, nodes:dec(s.nodes,Float32Array), edges:dec(s.edges,Int32Array), emb:dec(s.emb,Float32Array), emb2: s.emb2 ? dec(s.emb2,Float32Array) : null, arc:dec(s.arc,Float32Array), curv:dec(s.curv,Float32Array), zeta:dec(s.zeta,Float32Array), degen:dec(s.degen,Float32Array), noise:dec(s.noise,Float32Array), cov:dec(s.cov,Float32Array), on:s.kind!=="group", colour:colourOf(s.id)}))}));
@@ -570,6 +649,7 @@ function refreshExtraOptions(){
   const xs=EXTRA.map((e,i)=>["x:"+i, e.name+(e.kind==="cat"?" (categories)":"")]), xn=xs.filter((_,i)=>EXTRA[i].kind==="num");
   keep("colour", [["structure","structure"],["dim","dimension of the structure"],["idxh","estimated dimensionality, before smoothing"],["idxs","estimated dimensionality, after smoothing"]].concat(DATA.scores.map(s=>[s.key,s.label]), xs));
   keep("gcolour", [["count","points per node"],["median","median of the outlier score"],["nout","outliers per node"],["deg","node degree"],["curv","curvature at the node"],["noise","noise scale of the node"],["zeta","covariance scale zeta"],["degen","degenerate components"]].concat(DATA.names.map((n,i)=>["pc:"+i,"mean "+n]), xn.map(([v,t])=>[v,"mean "+t])));
+  keep("tnode", [["structure","the structure's colour"]].concat([...$("gcolour").options].map(o=>[o.value,o.text])));
   keep("gy", [["score","the outlier score"]].concat(DATA.names.map((n,i)=>["pc:"+i,n]), xn));
 }
 function pointValue(key){ // per-point numeric accessor for "pc:k" or a numeric extra
@@ -663,7 +743,7 @@ function compute(only){
 }
 function seqColour(vals){ // single-hue ramp, robust range
   const f=vals.filter(Number.isFinite); const lo=quantile(f,0.02), hi=quantile(f,0.98); return {cmin:lo,cmax:hi}; }
-function draw(){ buildDimToggles(); catLegend(); if(view==="graph") drawGraph(); else draw3d(); }
+function draw(){ buildDimToggles(); catLegend(); if(view==="graph") drawGraph(); else if(view==="topo") drawTopo(true); else draw3d(); }
 function catLegend(){ const cm=$("colour").value, e=extraOf(cm), box=$("catlegend"); box.innerHTML="";
   if(cm==="idxh"||cm==="idxs"||cm==="dim"){ const a=V[cur][cm], cnt=new Array(9).fill(0);
     if(cm==="dim"){ for(let i=0;i<N;i++) cnt[Math.min(V[cur].S[V[cur].sid[i]]?.dim||0,8)]++; } else if(a){ for(let i=0;i<N;i++) cnt[Math.min(a[i],8)]++; } else { box.textContent="No dimensionality estimates are stored for this version."; return; }
@@ -821,7 +901,124 @@ function drawLocator(v,s,idx,r){
   Plotly.react("locplot",traces,Object.assign({paper_bgcolor:"#ffffff",plot_bgcolor:"#ffffff",uirevision:"loc"+three},layout),{displayModeBar:false,responsive:true,scrollZoom:true});
   $("loctitle").textContent = `structure ${s.label} in the data (${ax.map(a=>DATA.names[a]).join(", ")})`;
 }
-function setView(w){ view=w; document.body.className = w==="graph" ? "vgraph" : "v3d"; document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===w)); Plotly.purge("plot"); lastThree=null; draw(); }
+
+// ---------------------------------------------------------------- topology page (canvas)
+const TV={scale:1,tx:0,ty:0,fitted:""}; let topoHover=-1, topoDrag=null, topoCache=null, topoRAF=0;
+function topoKey(){ return "examm-topo|"+document.title+"|"+V[cur].name+"|"+$("tmode").value; }
+function topoSave(){ try{ localStorage.setItem(topoKey(), JSON.stringify(V[cur].topo.isl.map(t=>[t.dx,t.dy,t.rot,t.flip]))); }catch(e){} }
+function topoLoad(){ const T=V[cur].topo; if(!T) return; let a=null; try{ a=JSON.parse(localStorage.getItem(topoKey())||"null"); }catch(e){}
+  T.isl.forEach((t,k)=>{ const q=a&&a.length===T.isl.length ? a[k] : [0,0,0,1]; t.dx=q[0]; t.dy=q[1]; t.rot=q[2]; t.flip=q[3]; }); }
+function topoGeometry(){
+  // radii, separated centres and link anchors of the current version and layout (cached)
+  const v=V[cur], T=v.topo, mode=$("tmode").value, key=cur+"|"+mode; if(T.geo && T.geo.key===key) return T.geo;
+  const K=T.isl.length, R=new Array(K), loc=T.isl.map(t=> mode==="joint" ? t.nj : t.ni), pl = mode==="joint" ? T.pj : T.pi;
+  const far=T.isl.map(()=>[]); for(let k=0;k<K;k++){ const L=loc[k]; for(let i=0;i<L.length/2;i++) far[k].push(Math.hypot(L[2*i],L[2*i+1])); }
+  const step=Math.max(1,Math.floor(N/6000)); for(let i=0;i<N;i+=step){ const k=T.pisl[i]; if(k>=0) far[k].push(Math.hypot(pl[2*i],pl[2*i+1])); }
+  for(let k=0;k<K;k++) R[k]=quantile(far[k],0.97)||0.1;
+  const medR=median(R), Rm=R.map(x=>Math.max(x,0.3*medR)), gap=0.18*medR, C=T.isl.map(t=>[t.c[0],t.c[1]]), C0=C.map(c=>[c[0],c[1]]);
+  for(let it=0;it<600;it++){ let moved=false;
+    for(let a=0;a<K;a++) for(let b=a+1;b<K;b++){ let dx=C[b][0]-C[a][0], dy=C[b][1]-C[a][1], L=Math.hypot(dx,dy); if(L<1e-9){ dx=1e-3*(b+1); dy=1e-3; L=Math.hypot(dx,dy); }
+      const need=Rm[a]+Rm[b]+gap; if(L<need){ const sh=(need-L)/L, wa=Rm[b]/(Rm[a]+Rm[b]); C[a][0]-=dx*sh*wa; C[a][1]-=dy*sh*wa; C[b][0]+=dx*sh*(1-wa); C[b][1]+=dy*sh*(1-wa); moved=true; } }
+    if(!moved) break; if(it<400) for(let k=0;k<K;k++){ C[k][0]+=0.01*(C0[k][0]-C[k][0]); C[k][1]+=0.01*(C0[k][1]-C[k][1]); } }
+  const anchor=(L,ids)=>{ let x=0,y=0; ids.forEach(i=>{ x+=L[2*i]; y+=L[2*i+1]; }); return [x/ids.length,y/ids.length]; };
+  const links=T.links.map(l=>({a:l.a,b:l.b,n:l.n,pa:anchor(loc[l.a],l.ia),pb:anchor(loc[l.b],l.ib)}));
+  const rows=T.isl.map(()=>[]); for(let i=0;i<N;i++){ const k=T.pisl[i]; if(k>=0) rows[k].push(i); }
+  T.geo={key,R:Rm,sep:C,loc,pl,links,rows,maxn:Math.max(1,...links.map(l=>l.n))}; return T.geo;
+}
+function topoIsland(k,G){ // centre and rotation of island k in world coordinates
+  const t=V[cur].topo.isl[k], f=+$("tsep").value; return {x:t.c[0]+f*(G.sep[k][0]-t.c[0])+t.dx, y:t.c[1]+f*(G.sep[k][1]-t.c[1])+t.dy, cs:Math.cos(t.rot), sn:Math.sin(t.rot), flip:t.flip}; }
+function topoVisible(k){ const v=V[cur], g=v.topo.isl[k].g; return v.S.some(s=>s.on && s.kind!=="group" && s.graph_of===g); }
+function topoFit(){ const cv=$("topo"), v=V[cur]; if(!v.topo) return; const G=topoGeometry(), ph=(+$("trot").value)*Math.PI/180, c=Math.cos(ph), sn=Math.sin(ph);
+  let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity; v.topo.isl.forEach((t,k)=>{ if(!topoVisible(k)) return; const p=topoIsland(k,G), X_=c*p.x-sn*p.y, Y_=sn*p.x+c*p.y, r=G.R[k]*1.15;
+    x0=Math.min(x0,X_-r); x1=Math.max(x1,X_+r); y0=Math.min(y0,Y_-r); y1=Math.max(y1,Y_+r); });
+  if(!Number.isFinite(x0)) return; const w=cv.clientWidth, h=cv.clientHeight; TV.scale=0.94*Math.min(w/(x1-x0), h/(y1-y0)); TV.tx=w/2-TV.scale*(x0+x1)/2; TV.ty=h/2+TV.scale*(y0+y1)/2; }
+function topoToWorld(mx,my){ const ph=(+$("trot").value)*Math.PI/180, c=Math.cos(ph), sn=Math.sin(ph), X_=(mx-TV.tx)/TV.scale, Y_=-(my-TV.ty)/TV.scale; return [c*X_+sn*Y_, -sn*X_+c*Y_]; }
+function topoHit(mx,my){ const v=V[cur]; if(!v.topo) return -1; const G=topoGeometry(), w=topoToWorld(mx,my); let best=-1;
+  v.topo.isl.forEach((t,k)=>{ if(!topoVisible(k)) return; const p=topoIsland(k,G); if(Math.hypot(w[0]-p.x,w[1]-p.y)<=G.R[k]*1.08 && (best<0 || G.R[k]<G.R[best])) best=k; }); return best; }
+function topoColours(r){
+  // colour index of every point and the palette, following "Colour points by"
+  const v=V[cur], cm=$("colour").value, e=extraOf(cm), ci=new Uint16Array(N), pal=[], idOf=new Map(); let bar=null;
+  const id=c=>{ let q=idOf.get(c); if(q===undefined){ q=pal.length; pal.push(c); idOf.set(c,q); } return q; };
+  if(cm==="structure") for(let i=0;i<N;i++) ci[i]=id(v.S[v.sid[i]] ? v.S[v.sid[i]].colour : "#b9b8b2");
+  else if(cm==="dim") for(let i=0;i<N;i++) ci[i]=id(DIMCOL[Math.min(v.S[v.sid[i]] ? v.S[v.sid[i]].dim : 0,8)]);
+  else if(cm==="idxh"||cm==="idxs") for(let i=0;i<N;i++) ci[i]=id(v[cm] ? DIMCOL[Math.min(v[cm][i],8)] : "#b9b8b2");
+  else if(e && e.kind==="cat") for(let i=0;i<N;i++) ci[i]=id(e.values[i]<0 ? "#b9b8b2" : colourOf(e.values[i]));
+  else { const vals = e ? e.values : v.scores[cm], f=[]; for(let i=0;i<N;i++) if(r.shown[i] && Number.isFinite(vals[i])) f.push(vals[i]); const rg=ramp(f);
+    for(let i=0;i<N;i++){ const b=rg.bin(vals[i]); ci[i]=id(b<0 ? "#d6d5cf" : RAMP[b]); } bar={title:"points: "+(e ? e.name : DATA.scores.find(q=>q.key===cm).label), lo:rg.lo, hi:rg.hi}; }
+  const order=new Int32Array(N); for(let i=0;i<N;i++) order[i]=i; order.sort((a,b)=>ci[a]-ci[b]); return {ci,pal,order,bar};
+}
+function drawTopo(recompute){
+  const cv=$("topo"), v=V[cur], ctx=cv.getContext("2d"), dpr=window.devicePixelRatio||1, w=cv.clientWidth, h=cv.clientHeight;
+  if(cv.width!==Math.round(w*dpr)||cv.height!==Math.round(h*dpr)){ cv.width=Math.round(w*dpr); cv.height=Math.round(h*dpr); }
+  ctx.setTransform(dpr,0,0,dpr,0,0); ctx.fillStyle="#ffffff"; ctx.fillRect(0,0,w,h);
+  if(!v.topo){ ctx.fillStyle="#52514e"; ctx.font="13px system-ui,sans-serif"; ctx.fillText("No topology layout is stored for this version.",20,30); $("status").textContent=v.name; return; }
+  const T=v.topo, G=topoGeometry(), fk=cur+"|"+$("tmode").value; if(TV.fitted!==fk){ topoLoad(); topoFit(); TV.fitted=fk; recompute=true; }
+  if(recompute||!topoCache||topoCache.key!==fk){ const r=compute(); lastOut=r; const col=topoColours(r), key=$("tnode").value, meta=scoreMeta(), sc=v.scores[$("score").value]; let nodes=null, nbar=null;
+    if(key!=="structure"){ const all=[]; nodes=T.isl.map((t,k)=>{ const np=nodeProperty(v,v.S[t.g],G.rows[k],r,sc,key,meta); np.val.forEach(x=>{ if(Number.isFinite(x)) all.push(x); }); nbar=np.title; return np.val; });
+      const rg=ramp(all); nodes=nodes.map(a=>a.map(x=>rg.bin(x))); nbar={title:"nodes: "+nbar, lo:rg.lo, hi:rg.hi}; }
+    topoCache={key:fk,r,col,nodes,nbar};
+    $("outinfo").innerHTML = `<b>${r.nout.toLocaleString()}</b> outliers among ${r.nshown.toLocaleString()} shown points (${r.nshown? (100*r.nout/r.nshown).toFixed(2):"0"} %)<br><span class="kind">${meta.low?"low":"high"} values are outliers · ${r.info||""}</span>`; }
+  const {r,col,nodes,nbar}=topoCache, ph=(+$("trot").value)*Math.PI/180, vc=Math.cos(ph), vs=Math.sin(ph), S_=TV.scale, K=T.isl.length;
+  // affine map local -> screen for every island
+  const M=new Array(K), vis=new Array(K);
+  for(let k=0;k<K;k++){ vis[k]=topoVisible(k); const p=topoIsland(k,G), a=p.cs*p.flip, b=-p.sn, c=p.sn*p.flip, d=p.cs; // world = [a b; c d] local + (p.x,p.y)
+    M[k]=[S_*(vc*a-vs*c), S_*(vc*b-vs*d), -S_*(vs*a+vc*c), -S_*(vs*b+vc*d), TV.tx+S_*(vc*p.x-vs*p.y), TV.ty-S_*(vs*p.x+vc*p.y)]; }
+  const px=(k,x,y)=>[M[k][0]*x+M[k][1]*y+M[k][4], M[k][2]*x+M[k][3]*y+M[k][5]];
+  const showL=$("tlabels").checked, hov=topoHover;
+  if(showL) for(let k=0;k<K;k++){ if(!vis[k]) continue; const s=v.S[T.isl[k].g], c0=px(k,0,0); ctx.beginPath(); ctx.arc(c0[0],c0[1],G.R[k]*1.08*S_,0,2*Math.PI);
+    ctx.globalAlpha = k===hov ? 0.13 : 0.05; ctx.fillStyle=s.colour; ctx.fill(); ctx.globalAlpha = k===hov ? 0.9 : 0.35; ctx.strokeStyle=s.colour; ctx.lineWidth = k===hov ? 1.6 : 0.8; ctx.stroke(); }
+  ctx.globalAlpha=1;
+  if($("tpts").checked){ const pl=G.pl, only=$("only").checked, hl=$("hl").checked, sz=Math.max(1.2,Math.min(3,+$("psize").value*0.8)); ctx.globalAlpha=Math.min(1,+$("popac").value+0.1); let last=-1;
+    if(!only) for(let q=0;q<N;q++){ const i=col.order[q], k=T.pisl[i]; if(k<0||!vis[k]||!r.shown[i]||(hl&&r.out[i])) continue; if(col.ci[i]!==last){ last=col.ci[i]; ctx.fillStyle=col.pal[last]; }
+      const m=M[k], x=pl[2*i], y=pl[2*i+1]; ctx.fillRect(m[0]*x+m[1]*y+m[4]-sz/2, m[2]*x+m[3]*y+m[5]-sz/2, sz, sz); }
+    ctx.globalAlpha=1; }
+  if($("tlinks").checked){ const minn=+$("tlink").value; ctx.lineCap="round"; G.links.forEach(l=>{ if(l.n<minn||!vis[l.a]||!vis[l.b]) return; const A=px(l.a,l.pa[0],l.pa[1]), B=px(l.b,l.pb[0],l.pb[1]), mine = hov===l.a||hov===l.b;
+      ctx.globalAlpha = hov<0 ? 0.4 : (mine ? 0.75 : 0.08); ctx.strokeStyle = mine ? "#0b0b0b" : "#52514e"; ctx.lineWidth=0.8+9*l.n/G.maxn; ctx.beginPath(); ctx.moveTo(A[0],A[1]); ctx.lineTo(B[0],B[1]); ctx.stroke(); }); ctx.globalAlpha=1; }
+  for(let k=0;k<K;k++){ if(!vis[k]) continue; const g=v.S[T.isl[k].g], E=g.edges, L=G.loc[k], m=M[k]; ctx.strokeStyle=g.colour; ctx.globalAlpha=0.75; ctx.lineWidth=0.8; ctx.beginPath();
+    for(let e=0;e<E.length/2;e++){ const a=E[2*e], b=E[2*e+1]; ctx.moveTo(m[0]*L[2*a]+m[1]*L[2*a+1]+m[4], m[2]*L[2*a]+m[3]*L[2*a+1]+m[5]); ctx.lineTo(m[0]*L[2*b]+m[1]*L[2*b+1]+m[4], m[2]*L[2*b]+m[3]*L[2*b+1]+m[5]); }
+    ctx.stroke(); ctx.globalAlpha=1; const nr=Math.max(1.6,Math.min(4.5,0.022*G.R[k]*S_+1.4));
+    for(let i=0;i<g.n_nodes;i++){ const x=m[0]*L[2*i]+m[1]*L[2*i+1]+m[4], y=m[2]*L[2*i]+m[3]*L[2*i+1]+m[5]; ctx.beginPath(); ctx.arc(x,y,nr,0,2*Math.PI);
+      ctx.fillStyle = nodes ? (nodes[k][i]<0 ? "#e4e3dd" : RAMP[nodes[k][i]]) : g.colour; ctx.fill(); if(nodes){ ctx.strokeStyle="#ffffff"; ctx.lineWidth=0.5; ctx.stroke(); } } }
+  if($("tpts").checked && ($("hl").checked||$("only").checked)){ const pl=G.pl; ctx.fillStyle="#e34948"; ctx.strokeStyle="#ffffff"; ctx.lineWidth=0.5;
+    for(let i=0;i<N;i++){ const k=T.pisl[i]; if(k<0||!vis[k]||!r.out[i]) continue; const m=M[k], x=m[0]*pl[2*i]+m[1]*pl[2*i+1]+m[4], y=m[2]*pl[2*i]+m[3]*pl[2*i+1]+m[5];
+      ctx.beginPath(); ctx.moveTo(x,y-4); ctx.lineTo(x+4,y); ctx.lineTo(x,y+4); ctx.lineTo(x-4,y); ctx.closePath(); ctx.fill(); ctx.stroke(); } }
+  if(showL){ ctx.font="12px system-ui,sans-serif"; ctx.textAlign="center"; ctx.textBaseline="bottom"; for(let k=0;k<K;k++){ if(!vis[k]) continue; const g=v.S[T.isl[k].g], c0=px(k,0,0), t=g.label+(g.kind==="group"?" (rest)":"")+" · "+g.dim+"-D";
+      const y=c0[1]-G.R[k]*1.08*S_-3, tw=ctx.measureText(t).width; ctx.fillStyle="rgba(255,255,255,0.8)"; ctx.fillRect(c0[0]-tw/2-3,y-14,tw+6,15); ctx.fillStyle="#0b0b0b"; ctx.fillText(t,c0[0],y); } }
+  // colour bars
+  let by=14; [nbar,col.bar].forEach(b=>{ if(!b) return; const bw=16, x0=w-18-7*bw; ctx.textAlign="left"; ctx.textBaseline="top"; ctx.font="11px system-ui,sans-serif"; const tw=Math.max(ctx.measureText(b.title).width,7*bw);
+    ctx.fillStyle="rgba(255,255,255,0.85)"; ctx.fillRect(w-26-tw,by-4,tw+16,46); ctx.fillStyle="#52514e"; ctx.fillText(b.title,w-18-tw,by); RAMP.forEach((c,i)=>{ ctx.fillStyle=c; ctx.fillRect(x0+i*bw,by+15,bw,9); });
+    ctx.fillStyle="#52514e"; ctx.fillText(b.lo.toPrecision(3),x0,by+26); ctx.textAlign="right"; ctx.fillText(b.hi.toPrecision(3),x0+7*bw,by+26); by+=52; });
+  const nv=vis.filter(Boolean).length, nl=G.links.filter(l=>l.n>=+$("tlink").value&&vis[l.a]&&vis[l.b]).length;
+  $("status").textContent = v.name+" · "+nv+" structures, "+nl+" links"+(hov>=0 ? " · structure "+v.S[T.isl[hov].g].label+": "+v.S[T.isl[hov].g].dim+"-D, "+v.S[T.isl[hov].g].n_nodes+" nodes, "+G.rows[hov].length.toLocaleString()+" points" : " · drag a structure to move it, Shift-drag to turn it");
+}
+function topoRedraw(){ if(topoRAF) return; topoRAF=requestAnimationFrame(()=>{ topoRAF=0; if(view==="topo") drawTopo(false); }); }
+(function(){ const cv=$("topo"), pos=e=>{ const b=cv.getBoundingClientRect(); return [e.clientX-b.left, e.clientY-b.top]; };
+  cv.addEventListener("pointerdown",e=>{ if(!V[cur].topo) return; const [mx,my]=pos(e), k=topoHit(mx,my); cv.setPointerCapture(e.pointerId);
+    if(k>=0){ const G=topoGeometry(), p=topoIsland(k,G), w=topoToWorld(mx,my), t=V[cur].topo.isl[k]; topoDrag={k, turn:e.shiftKey, w0:w, dx:t.dx, dy:t.dy, rot:t.rot, a0:Math.atan2(w[1]-p.y,w[0]-p.x)}; }
+    else topoDrag={k:-1, mx, my, tx:TV.tx, ty:TV.ty}; cv.style.cursor="grabbing"; });
+  cv.addEventListener("pointermove",e=>{ if(!V[cur].topo) return; const [mx,my]=pos(e);
+    if(!topoDrag){ const k=topoHit(mx,my); if(k!==topoHover){ topoHover=k; cv.style.cursor = k>=0 ? "move" : "grab"; topoRedraw(); } return; }
+    if(topoDrag.k<0){ TV.tx=topoDrag.tx+mx-topoDrag.mx; TV.ty=topoDrag.ty+my-topoDrag.my; }
+    else { const t=V[cur].topo.isl[topoDrag.k], w=topoToWorld(mx,my);
+      if(topoDrag.turn){ const G=topoGeometry(), p=topoIsland(topoDrag.k,G); t.rot=topoDrag.rot+Math.atan2(w[1]-p.y,w[0]-p.x)-topoDrag.a0; }
+      else { t.dx=topoDrag.dx+w[0]-topoDrag.w0[0]; t.dy=topoDrag.dy+w[1]-topoDrag.w0[1]; } }
+    topoRedraw(); });
+  const end=()=>{ if(topoDrag && topoDrag.k>=0) topoSave(); topoDrag=null; cv.style.cursor = topoHover>=0 ? "move" : "grab"; };
+  cv.addEventListener("pointerup",end); cv.addEventListener("pointercancel",end);
+  cv.addEventListener("pointerleave",()=>{ if(!topoDrag && topoHover>=0){ topoHover=-1; topoRedraw(); } });
+  cv.addEventListener("wheel",e=>{ e.preventDefault(); const [mx,my]=pos(e), f=Math.exp(-e.deltaY*0.0015); TV.tx=mx-(mx-TV.tx)*f; TV.ty=my-(my-TV.ty)*f; TV.scale*=f; topoRedraw(); },{passive:false});
+  cv.addEventListener("dblclick",e=>{ const [mx,my]=pos(e), k=topoHit(mx,my); if(k<0) return; const g=String(V[cur].topo.isl[k].g), sel=$("gstruct"); let o=[...sel.options].find(o=>o.value===g) || [...sel.options].find(o=>V[cur].S[+o.value] && String(V[cur].S[+o.value].graph_of)===g); if(o){ sel.value=o.value; setView("graph"); } });
+  window.addEventListener("keydown",e=>{ if(view!=="topo"||topoHover<0||(e.key!=="f"&&e.key!=="F")||e.target.tagName==="INPUT"||e.target.tagName==="SELECT") return; V[cur].topo.isl[topoHover].flip*=-1; topoSave(); topoRedraw(); });
+  window.addEventListener("resize",()=>{ if(view==="topo") topoRedraw(); });
+  $("tmode").addEventListener("input",()=>{ $("tsep").value = $("tmode").value==="joint" ? 0 : 1; TV.fitted=""; draw(); });
+  ["tsep","trot"].forEach(id=>$(id).addEventListener("input",topoRedraw)); $("tsep").addEventListener("change",()=>{ topoFit(); topoRedraw(); });
+  $("tlink").addEventListener("input",()=>{ $("tlinkv").textContent=$("tlink").value; topoRedraw(); });
+  ["tpts","tlinks","tlabels"].forEach(id=>$(id).addEventListener("input",topoRedraw)); $("tnode").addEventListener("input",()=>{ if(view==="topo") drawTopo(true); });
+  $("treset").onclick=()=>{ V[cur].topo && V[cur].topo.isl.forEach(t=>{ t.dx=0; t.dy=0; t.rot=0; t.flip=1; }); $("trot").value=0; topoSave(); topoFit(); topoRedraw(); };
+  $("tfit").onclick=()=>{ topoFit(); topoRedraw(); };
+  $("tpng").onclick=()=>{ const a=document.createElement("a"); a.href=cv.toDataURL("image/png"); a.download="topology.png"; a.click(); };
+})();
+function setView(w){ view=w; document.body.className = w==="graph" ? "vgraph" : w==="topo" ? "vtopo" : "v3d"; document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===w)); Plotly.purge("plot"); lastThree=null; draw(); }
 function triIndex(a,b){ if(a>b){ const t=a;a=b;b=t; } return a*D - (a*(a-1))/2 + (b-a); }
 function gridDensity(structs, ax, G){
   // marginal density of the selected leaves on the shown features, splatted on a regular grid
