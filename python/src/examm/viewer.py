@@ -460,7 +460,7 @@ button:hover{border-color:var(--accent)}
 #dimtog{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 6px}
 #dimtog label{display:flex;align-items:center;gap:4px;margin:0;color:var(--ink)}
 .info{position:relative;display:inline-block;width:15px;height:15px;line-height:15px;text-align:center;border-radius:50%;border:1px solid var(--muted);color:var(--muted);font-size:10px;font-weight:600;cursor:help;margin-left:4px}
-.infobox{display:none;position:absolute;left:-40px;bottom:20px;width:300px;z-index:20;background:#ffffff;color:#0b0b0b;border:1px solid var(--line);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:10px 12px;text-align:left;font-weight:400;font-size:11.5px;line-height:1.45;cursor:default}
+.infobox{display:none;position:fixed;left:16px;top:44px;width:310px;max-height:calc(100vh - 80px);overflow:auto;z-index:20;background:#ffffff;color:#0b0b0b;border:1px solid var(--line);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:10px 12px;text-align:left;font-weight:400;font-size:11.5px;line-height:1.45;cursor:default}
 .info:hover .infobox,.info:focus .infobox{display:block}.infobox b{display:block;margin-top:6px}.infobox b:first-child{margin-top:0}
 #catlegend{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:4px;font-size:11px}#catlegend span{display:flex;align-items:center;gap:4px}
 .viewonly{display:none}body.v3d .only3d{display:block}body.vgraph .onlygraph{display:block}
