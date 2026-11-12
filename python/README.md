@@ -180,9 +180,13 @@ again; `examples/05_viewer_for_your_data.py` does both from the command line.
 
 - **3-D view**: the points with a choice of the three features, the graphs, a tree for switching
   structures, parents, leaves or residuals on and off, and toggles per dimension.
-- **Graph view**: one structure at a time. Surfaces and higher are shown as the abstract graph
-  laid out in the plane, nodes coloured by points per node, a score, outliers per node or the
-  mean of any feature or label; curves are shown as a profile along their arc length.
+- **Graph view**: one structure at a time, drawn in its own dimension by unfolding its graph
+  (multidimensional scaling of the distances along the edges): a curve as a line with a
+  profile above it, a surface in the plane, a 3-D structure in space, a 4-D one through 3-D
+  projections of four intrinsic coordinates. Nodes can be coloured by points per node, a score,
+  outliers per node, degree, curvature, noise scale, covariance scale, degenerate components or
+  the mean of any feature or label; edges by curvature, length or the distortion of the layout;
+  node size can follow the number of points.
 - **Outliers**: on any per-point score (log density, orthogonal distance, its Mahalanobis form
   and tail probability, regional rank, background probability), by percentile or by an explicit
   threshold, over all shown points or within each structure. Selections download as CSV.

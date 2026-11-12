@@ -34,36 +34,55 @@ def _b64(a, dtype) -> str:
     return base64.b64encode(np.ascontiguousarray(a, dtype=dtype).tobytes()).decode("ascii")
 
 
-def _graph_layout(means: np.ndarray, edges: np.ndarray, dim: int):
-    """Planar layout of an abstract graph and, for chains, the arc length of every node.
+def _graph_embedding(means: np.ndarray, edges: np.ndarray, dim: int, max_landmarks: int = 1500, seed: int = 0):
+    """Intrinsic coordinates of a graph, for drawing it in its own dimension.
 
-    Uses a force layout (networkx) when available, otherwise the two leading principal
-    components of the node positions."""
+    The graph is unfolded by classical multidimensional scaling of the geodesic distances
+    measured along its edges (Isomap): ``m = min(max(dim, 2), 4)`` coordinates, so a surface is
+    drawn in the plane, a 3-D structure in space, and a 4-D one through 3-D projections of four
+    coordinates. Large graphs use landmark MDS. For chains the arc length of every node is
+    returned as well (empty array otherwise).
+    """
+    from scipy.linalg import eigh
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import shortest_path
+
     n = len(means)
+    m = int(min(max(dim, 2), 4))
+    edges = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
     arc = np.zeros(0)
     if dim == 1 and n >= 2:
         try:
             from .crawling import ManifoldGraph
             from .viz import chain_order
 
-            order, s = chain_order(ManifoldGraph(means, edges, 1))
+            order, s_ = chain_order(ManifoldGraph(means, edges, 1))
             if len(order) == n:
                 arc = np.zeros(n)
-                arc[order] = s
-        except Exception:  # noqa: BLE001 - layout is best effort
+                arc[order] = s_
+        except Exception:  # noqa: BLE001 - the arc is optional
             arc = np.zeros(0)
-    try:
-        import networkx as nx
-
-        G = nx.Graph()
-        G.add_nodes_from(range(n))
-        G.add_edges_from(np.asarray(edges).tolist())
-        pos = nx.kamada_kawai_layout(G) if n <= 1200 else nx.spring_layout(G, seed=0, iterations=60)
-        xy = np.array([pos[k] for k in range(n)], dtype=float)
-    except Exception:  # noqa: BLE001
-        c = means - means.mean(0)
-        xy = c @ np.linalg.svd(c, full_matrices=False)[2][:2].T if n > 2 else np.c_[np.arange(n), np.zeros(n)]
-    return xy, arc
+    if n <= m or len(edges) == 0:
+        return np.zeros((n, m)), arc
+    w = np.linalg.norm(means[edges[:, 0]] - means[edges[:, 1]], axis=1) + 1e-12
+    A = coo_matrix((np.r_[w, w], (np.r_[edges[:, 0], edges[:, 1]], np.r_[edges[:, 1], edges[:, 0]])), shape=(n, n)).tocsr()
+    land = np.arange(n) if n <= max_landmarks else np.sort(np.random.default_rng(seed).choice(n, max_landmarks, replace=False))
+    Dl = shortest_path(A, method="D", directed=False, indices=land)          # (L, n)
+    finite = np.isfinite(Dl)
+    Dl[~finite] = 1.5 * Dl[finite].max() if finite.any() else 1.0            # disconnected pieces: push apart
+    D2 = Dl[:, land] ** 2
+    L = len(land)
+    J = np.eye(L) - 1.0 / L
+    vals, vecs = eigh(-0.5 * J @ D2 @ J, subset_by_index=[max(L - m, 0), L - 1])
+    vals, vecs = vals[::-1], vecs[:, ::-1]
+    pos = np.maximum(vals, 1e-12)
+    if n == L:
+        emb = vecs * np.sqrt(pos)
+    else:                                                                   # landmark MDS triangulation
+        emb = (-0.5 * (vecs / np.sqrt(pos)).T @ (Dl ** 2 - D2.mean(1, keepdims=True))).T
+    out = np.zeros((n, m))
+    out[:, :emb.shape[1]] = emb
+    return out, arc
 
 
 def _version_payload(H, X, hops: int, min_region: int) -> dict:
@@ -76,19 +95,26 @@ def _version_payload(H, X, hops: int, min_region: int) -> dict:
             sid = len(structures)
             node_id[id(c)] = sid
             g = c.model.graph
-            xy, arc = _graph_layout(c.model.means_, g.edges, int(g.dim))
+            emb, arc = _graph_embedding(c.model.means_, g.edges, int(g.dim))
+            cov = c.model.covariances_
+            degen = np.zeros(g.n_nodes, dtype=np.float32)
+            degen[c.model.diagnostics_["degenerate"]] = 1.0
             structures.append({"id": sid, "label": c.label, "parent": parent_id, "level": c.level, "dim": int(g.dim),
                                "kind": "group" if c.children else "leaf", "weight": float(c.weight),
                                "nodes": _b64(c.model.means_, np.float32), "n_nodes": int(g.n_nodes),
                                "edges": _b64(g.edges, np.int32), "graph_of": sid,
-                               "layout": _b64(xy, np.float32), "arc": _b64(arc, np.float32) if len(arc) else ""})
+                               "emb": _b64(emb, np.float32), "m": int(emb.shape[1]),
+                               "arc": _b64(arc, np.float32) if len(arc) else "",
+                               "curv": _b64(c.model.edge_curvature(), np.float32),
+                               "zeta": _b64(c.model.zeta_, np.float32), "degen": _b64(degen, np.float32),
+                               "noise": _b64(np.sqrt(np.einsum("kaa->k", cov) / cov.shape[1]), np.float32)})
             walk(c, sid)
             if c.children and c.pi_residual > 0:
                 rid = len(structures)
                 structures.append({"id": rid, "label": f"{c.label} (residual)", "parent": sid, "level": c.level + 1,
                                    "dim": int(g.dim), "kind": "residual", "weight": float(c.weight * c.pi_residual),
                                    "nodes": "", "n_nodes": 0, "edges": "", "graph_of": sid,
-                                   "layout": "", "arc": ""})
+                                   "emb": "", "m": 0, "arc": "", "curv": "", "zeta": "", "degen": "", "noise": ""})
                 node_id[("res", id(c))] = rid
 
     walk(H.root_, -1)
@@ -228,10 +254,13 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <div class="viewonly onlygraph">
   <h2>Graph view</h2>
   <label for="gstruct">Structure</label><select id="gstruct"></select>
-  <label for="gcolour">Colour nodes by (surfaces)</label><select id="gcolour"></select>
+  <label for="gcolour">Colour nodes by</label><select id="gcolour"></select>
+  <label for="gedge">Colour edges by</label><select id="gedge"><option value="none">nothing (grey)</option><option value="curv">curvature along the edge</option><option value="len">edge length in data space</option><option value="stretch">distortion of the layout</option></select>
+  <div id="gprojwrap" style="display:none"><label for="gproj">Projection (three of the four intrinsic coordinates)</label><select id="gproj"><option value="123">coordinates 1, 2, 3</option><option value="124">coordinates 1, 2, 4</option><option value="134">coordinates 1, 3, 4</option><option value="234">coordinates 2, 3, 4</option></select></div>
+  <label class="check"><input type="checkbox" id="gsize" checked> node size by number of points</label>
   <label for="gy">Vertical axis (curves)</label><select id="gy"></select>
   <label class="check"><input type="checkbox" id="gpts" checked> points of the structure</label>
-  <p class="hint">Surfaces and higher: the abstract graph laid out in the plane; each point sits at its position on the graph (with a little jitter). Curves: each point at its position along the curve (horizontal) against the outlier score (vertical); grey lines mark the nodes.</p>
+  <p class="hint">Each structure is drawn in its own dimension, unfolded along its graph (geodesic distances along the edges): a curve as a line with a profile above it, a surface in the plane, a 3-D structure in space, a 4-D one through 3-D projections. Points sit at their position on the graph, with a little jitter.</p>
   </div>
   <h2>Structures</h2>
   <div id="dimtog"></div>
@@ -267,7 +296,7 @@ const N=DATA.n, D=DATA.d, X=dec(DATA.X, Float32Array);
 const V = DATA.versions.map(v => ({name:v.name, summary:v.summary, sid:dec(v.sid,Int16Array), node:dec(v.node,Int32Array),
   toward:dec(v.toward,Int32Array), frac:dec(v.frac,Float32Array),
   scores:Object.fromEntries(Object.entries(v.scores).map(([k,b])=>[k,dec(b,Float32Array)])),
-  S:v.structures.map(s=>({...s, nodes:dec(s.nodes,Float32Array), edges:dec(s.edges,Int32Array), layout:dec(s.layout,Float32Array), arc:dec(s.arc,Float32Array), on:s.kind!=="group", colour:colourOf(s.id)}))}));
+  S:v.structures.map(s=>({...s, nodes:dec(s.nodes,Float32Array), edges:dec(s.edges,Int32Array), emb:dec(s.emb,Float32Array), arc:dec(s.arc,Float32Array), curv:dec(s.curv,Float32Array), zeta:dec(s.zeta,Float32Array), degen:dec(s.degen,Float32Array), noise:dec(s.noise,Float32Array), on:s.kind!=="group", colour:colourOf(s.id)}))}));
 let view = "3d";
 const EXTRA = (DATA.extra||[]).map(e=>({name:e.name, kind:e.kind, cats:e.cats||[], values: e.kind==="num" ? dec(e.values,Float32Array) : dec(e.values,Int32Array)}));
 function extraOf(key){ return key && key.startsWith("x:") ? EXTRA[+key.slice(2)] : null; }
@@ -275,7 +304,7 @@ function refreshExtraOptions(){
   const keep=(id,items)=>{ const el=$(id), old=el.value; fill(el, items); if(items.some(([v])=>v===old)) el.value=old; };
   const xs=EXTRA.map((e,i)=>["x:"+i, e.name+(e.kind==="cat"?" (categories)":"")]), xn=xs.filter((_,i)=>EXTRA[i].kind==="num");
   keep("colour", [["structure","structure"],["dim","dimension of the structure"]].concat(DATA.scores.map(s=>[s.key,s.label]), xs));
-  keep("gcolour", [["count","points per node"],["median","median of the outlier score"],["nout","outliers per node"]].concat(DATA.names.map((n,i)=>["pc:"+i,"mean "+n]), xn.map(([v,t])=>[v,"mean "+t])));
+  keep("gcolour", [["count","points per node"],["median","median of the outlier score"],["nout","outliers per node"],["deg","node degree"],["curv","curvature at the node"],["noise","noise scale of the node"],["zeta","covariance scale zeta"],["degen","degenerate components"]].concat(DATA.names.map((n,i)=>["pc:"+i,"mean "+n]), xn.map(([v,t])=>[v,"mean "+t])));
   keep("gy", [["score","the outlier score"]].concat(DATA.names.map((n,i)=>["pc:"+i,n]), xn));
 }
 function pointValue(key){ // per-point numeric accessor for "pc:k" or a numeric extra
@@ -389,54 +418,108 @@ function fillGraphSelect(){
 }
 function hash01(i,k){ let x=((i+1)*2654435761 + k*40503)>>>0; x^=x>>>15; x=Math.imul(x,2246822519)>>>0; x^=x>>>13; return x/4294967296; }
 function median(a){ if(!a.length) return NaN; const b=Float64Array.from(a).sort(); const m=b.length>>1; return b.length%2? b[m] : 0.5*(b[m-1]+b[m]); }
+const RAMP=["#c6dbef","#9ecae1","#6baed6","#4292c6","#2171b5","#08519c","#08306b"];
+const RAMPSCALE=RAMP.map((c,i)=>[i/(RAMP.length-1),c]);
+function ramp(vals){ const f=Array.from(vals).filter(Number.isFinite); if(!f.length) return {lo:0,hi:1,bin:()=>-1};
+  let lo=quantile(f,0.02), hi=quantile(f,0.98); if(!(hi>lo)){ lo=Math.min(...f); hi=Math.max(...f); if(!(hi>lo)) hi=lo+1e-9; }
+  return {lo,hi,bin:x=>Number.isFinite(x)? Math.max(0,Math.min(RAMP.length-1,Math.floor((x-lo)/(hi-lo)*RAMP.length))) : -1}; }
+function nodeProperty(v,g,idx,r,sc,cm,meta){
+  const K=g.n_nodes, E=g.edges, n=E.length/2, cnt=new Float64Array(K), nout=new Float64Array(K), val=new Array(K).fill(NaN); let title="";
+  idx.forEach(i=>{ cnt[v.node[i]]++; if(r.out[i]) nout[v.node[i]]++; });
+  if(cm==="count"){ for(let k=0;k<K;k++) val[k]=cnt[k]; title="points per node"; }
+  else if(cm==="nout"){ for(let k=0;k<K;k++) val[k]=nout[k]; title="outliers per node"; }
+  else if(cm==="median"){ const lists=Array.from({length:K},()=>[]); idx.forEach(i=>{ if(Number.isFinite(sc[i])) lists[v.node[i]].push(sc[i]); }); for(let k=0;k<K;k++) val[k]=median(lists[k]); title="median "+meta.label; }
+  else if(cm==="deg"){ val.fill(0); for(let e=0;e<n;e++){ val[E[2*e]]++; val[E[2*e+1]]++; } title="node degree (number of edges)"; }
+  else if(cm==="curv"){ const sum=new Float64Array(K), c=new Float64Array(K); for(let e=0;e<n;e++){ const q=g.curv[e]; if(!Number.isFinite(q)) continue; sum[E[2*e]]+=q; c[E[2*e]]++; sum[E[2*e+1]]+=q; c[E[2*e+1]]++; } for(let k=0;k<K;k++) val[k]=c[k]? sum[k]/c[k] : NaN; title="mean curvature of the edges at the node"; }
+  else if(cm==="noise"){ for(let k=0;k<K;k++) val[k]=g.noise[k]; title="noise scale of the node's Gaussian"; }
+  else if(cm==="zeta"){ for(let k=0;k<K;k++) val[k]=g.zeta[k]; title="covariance scale zeta"; }
+  else if(cm==="degen"){ for(let k=0;k<K;k++) val[k]=g.degen[k]; title="degenerate component (1 = yes)"; }
+  else { const pf=pointValue(cm), sum=new Float64Array(K), c=new Float64Array(K); idx.forEach(i=>{ const t=pf(i); if(Number.isFinite(t)){ sum[v.node[i]]+=t; c[v.node[i]]++; } });
+    for(let k=0;k<K;k++) val[k]=c[k]? sum[k]/c[k] : NaN; title="mean "+(cm.startsWith("pc:")? DATA.names[+cm.slice(3)] : extraOf(cm).name); }
+  return {val,title,cnt,nout};
+}
+function edgeProperty(g,key,pos,nd){
+  const E=g.edges, n=E.length/2, P=g.nodes, val=new Float64Array(n); let title="";
+  const elen=e=>{ let q=0; const a=E[2*e]*D, b=E[2*e+1]*D; for(let k=0;k<D;k++){ const t=P[a+k]-P[b+k]; q+=t*t; } return Math.sqrt(q); };
+  if(key==="curv"){ for(let e=0;e<n;e++) val[e]=g.curv[e]; title="curvature along the edge"; }
+  else if(key==="len"){ for(let e=0;e<n;e++) val[e]=elen(e); title="edge length in data space"; }
+  else if(key==="stretch"){ const ratio=[]; for(let e=0;e<n;e++){ let q=0; for(let a=0;a<nd;a++){ const t=pos(E[2*e],a)-pos(E[2*e+1],a); q+=t*t; } val[e]=Math.sqrt(q)/Math.max(elen(e),1e-300); ratio.push(val[e]); }
+    const md=median(ratio)||1; for(let e=0;e<n;e++) val[e]/=md; title="distortion of the layout (drawn length / true length, 1 = typical)"; }
+  return {val,title};
+}
 function drawGraph(){
   const v=V[cur], sidSel=+$("gstruct").value, s=v.S[sidSel];
   if(!s){ Plotly.react("plot",[],{}); return; }
-  const g=v.S[s.graph_of], K=g.n_nodes, L=g.layout, E=g.edges, P=g.nodes;
+  const g=v.S[s.graph_of], K=g.n_nodes, E=g.edges, n=E.length/2, P=g.nodes, m=g.m;
   const r=compute(sidSel); lastOut=r;
-  const key=$("score").value, sc=v.scores[key], meta=scoreMeta(), hl=$("hl").checked, only=$("only").checked;
+  const key=$("score").value, sc=v.scores[key], meta=scoreMeta(), hl=$("hl").checked, only=$("only").checked, showPts=$("gpts").checked, bySize=$("gsize").checked;
   const idx=[]; for(let i=0;i<N;i++) if(v.sid[i]===sidSel) idx.push(i);
-  const traces=[], ht="row %{customdata[0]}<br>score %{customdata[1]:.4g}<extra></extra>";
+  const ht="row %{customdata[0]}<br>score %{customdata[1]:.4g}<extra></extra>";
+  const nht="node %{customdata[0]}<br>%{customdata[1]} points, %{customdata[2]} outliers<br>value %{customdata[3]:.4g}<extra></extra>";
   const is1d = g.dim===1 && g.arc.length===K;
   const cutKey = (document.querySelector("input[name=mode]:checked").value==="pct" && $("scope").value==="each") ? sidSel : -1, cut = r.cuts.has(cutKey) ? r.cuts.get(cutKey) : NaN;
-  let layout;
+  const np=nodeProperty(v,g,idx,r,sc,$("gcolour").value,meta), nr=ramp(np.val);
+  const maxc=Math.max(1,...np.cnt), nsize=k=> bySize ? 5+13*Math.sqrt(np.cnt[k]/maxc) : 9;
+  const ekey=$("gedge").value;
+  $("gprojwrap").style.display = (!is1d && g.dim>=4 && m>=4) ? "block" : "none";
+  const traces=[]; let layout, kind;
+  const nodeMarker=(sizes)=>({size:sizes,color:np.val,colorscale:RAMPSCALE,cmin:nr.lo,cmax:nr.hi,line:{color:"#ffffff",width:0.6},
+    colorbar:{title:{text:np.title,side:"right"},thickness:12,len:0.55,x:1.0,y:0.72}});
+  const edgeBar=(ep,er,type,extra)=>Object.assign({type,mode:"markers",x:[null],y:[null],hoverinfo:"skip",showlegend:false,
+    marker:{size:0.1,color:[er.lo,er.hi],colorscale:RAMPSCALE,cmin:er.lo,cmax:er.hi,showscale:true,colorbar:{title:{text:ep.title,side:"right"},thickness:12,len:0.4,x:1.0,y:0.2}}},extra||{});
   if(is1d){
+    kind="curve";
+    const pos=(k,a)=> a===0 ? g.arc[k] : 0, ep = ekey==="none" ? null : edgeProperty(g,ekey,pos,1), er = ep ? ramp(ep.val) : null;
     const elen=(a,b)=>{ let q=0; for(let k=0;k<D;k++){ const t=P[a*D+k]-P[b*D+k]; q+=t*t; } return Math.sqrt(q); };
     const px=[],py=[],cd=[],ox=[],oy=[],ocd=[];
     const yk=$("gy").value, yf = yk==="score" ? (i=>sc[i]) : pointValue(yk), ylab = yk==="score" ? meta.label : (yk.startsWith("pc:") ? DATA.names[+yk.slice(3)] : extraOf(yk).name);
-    idx.forEach(i=>{ const a=v.node[i], b=v.toward[i]; const pos=g.arc[a]+Math.sign(g.arc[b]-g.arc[a])*v.frac[i]*elen(a,b), y=yf(i);
+    idx.forEach(i=>{ const a=v.node[i], b=v.toward[i]; const x=g.arc[a]+Math.sign(g.arc[b]-g.arc[a])*v.frac[i]*elen(a,b), y=yf(i);
       if(!Number.isFinite(y)) return;
-      if(r.out[i]){ ox.push(pos);oy.push(y);ocd.push([i,sc[i]]); if(hl||only) return; } if(only) return; px.push(pos);py.push(y);cd.push([i,sc[i]]); });
-    if($("gpts").checked) traces.push({type:"scattergl",mode:"markers",x:px,y:py,customdata:cd,hovertemplate:ht,marker:{size:5,color:s.colour,opacity:0.7},name:"points",showlegend:false});
-    if(ox.length) traces.push({type:"scattergl",mode:"markers",x:ox,y:oy,customdata:ocd,hovertemplate:ht,marker:{size:9,color:"#e34948",symbol:"diamond",line:{color:"#fff",width:0.5}},name:"outliers",showlegend:false});
-    const shapes=[]; for(let k=0;k<K;k++) shapes.push({type:"line",xref:"x",yref:"paper",x0:g.arc[k],x1:g.arc[k],y0:0,y1:1,line:{color:"#dddcd6",width:1}});
-    if(Number.isFinite(cut) && yk==="score") shapes.push({type:"line",xref:"paper",yref:"y",x0:0,x1:1,y0:cut,y1:cut,line:{color:"#e34948",width:1,dash:"dash"}});
-    layout={shapes, xaxis:{title:{text:"position along the curve (arc length)"},gridcolor:"#eeede8",zeroline:false}, yaxis:{title:{text:ylab},gridcolor:"#eeede8",zeroline:false}};
-  } else {
-    const n=E.length/2, ex=new Array(3*n), ey=new Array(3*n); let med=[];
-    for(let e=0;e<n;e++){ const a=E[2*e], b=E[2*e+1]; ex[3*e]=L[2*a];ex[3*e+1]=L[2*b];ex[3*e+2]=null; ey[3*e]=L[2*a+1];ey[3*e+1]=L[2*b+1];ey[3*e+2]=null; med.push(Math.hypot(L[2*a]-L[2*b],L[2*a+1]-L[2*b+1])); }
-    const jit=0.3*(median(med)||0.01);
-    traces.push({type:"scattergl",mode:"lines",x:ex,y:ey,line:{color:"#c9c8c2",width:1},hoverinfo:"skip",showlegend:false});
-    const cnt=new Float64Array(K), nout=new Float64Array(K), lists=Array.from({length:K},()=>[]), cm=$("gcolour").value;
-    const pcSum=new Float64Array(K), pcN=new Float64Array(K), pf=pointValue(cm);
-    const px=[],py=[],cd=[],ox=[],oy=[],ocd=[];
-    idx.forEach(i=>{ const a=v.node[i], b=v.toward[i], f=v.frac[i]; cnt[a]++; if(r.out[i]) nout[a]++; if(Number.isFinite(sc[i])) lists[a].push(sc[i]); if(pf){ const t=pf(i); if(Number.isFinite(t)){ pcSum[a]+=t; pcN[a]++; } }
-      const ang=2*Math.PI*hash01(i,1), rad=jit*Math.sqrt(hash01(i,2));
-      const x=L[2*a]+f*(L[2*b]-L[2*a])+rad*Math.cos(ang), y=L[2*a+1]+f*(L[2*b+1]-L[2*a+1])+rad*Math.sin(ang);
       if(r.out[i]){ ox.push(x);oy.push(y);ocd.push([i,sc[i]]); if(hl||only) return; } if(only) return; px.push(x);py.push(y);cd.push([i,sc[i]]); });
-    if($("gpts").checked && px.length) traces.push({type:"scattergl",mode:"markers",x:px,y:py,customdata:cd,hovertemplate:ht,marker:{size:3,color:"#b9b8b2",opacity:0.6},name:"points",showlegend:false});
-    const val=new Array(K);
-    for(let k=0;k<K;k++){ val[k] = cm==="count" ? cnt[k] : cm==="nout" ? nout[k] : cm==="median" ? median(lists[k]) : (pcN[k]? pcSum[k]/pcN[k] : NaN); }
-    const title = cm==="count" ? "points per node" : cm==="nout" ? "outliers per node" : cm==="median" ? "median "+meta.label : "mean "+(cm.startsWith("pc:") ? DATA.names[+cm.slice(3)] : extraOf(cm).name);
-    const nx=[],ny=[],ncd=[]; for(let k=0;k<K;k++){ nx.push(L[2*k]); ny.push(L[2*k+1]); ncd.push([k,cnt[k],nout[k],val[k]]); }
-    traces.push({type:"scattergl",mode:"markers",x:nx,y:ny,customdata:ncd,hovertemplate:"node %{customdata[0]}<br>%{customdata[1]} points, %{customdata[2]} outliers<br>value %{customdata[3]:.4g}<extra></extra>",
-      marker:{size:8,color:val,colorscale:"Blues",reversescale:true,line:{color:"#fff",width:0.5},colorbar:{title:{text:title,side:"right"},thickness:12,len:0.6}},name:"nodes",showlegend:false});
-    if(ox.length) traces.push({type:"scattergl",mode:"markers",x:ox,y:oy,customdata:ocd,hovertemplate:ht,marker:{size:9,color:"#e34948",symbol:"diamond",line:{color:"#fff",width:0.5}},name:"outliers",showlegend:false});
-    layout={xaxis:{visible:false}, yaxis:{visible:false,scaleanchor:"x"}};
+    if(showPts) traces.push({type:"scattergl",mode:"markers",x:px,y:py,customdata:cd,hovertemplate:ht,marker:{size:5,color:s.colour,opacity:0.7},showlegend:false});
+    if(ox.length) traces.push({type:"scattergl",mode:"markers",x:ox,y:oy,customdata:ocd,hovertemplate:ht,marker:{size:9,color:"#e34948",symbol:"diamond",line:{color:"#fff",width:0.5}},showlegend:false});
+    // the curve itself as a line: one segment per edge, nodes on top
+    for(let e=0;e<n;e++){ const b=ep? er.bin(ep.val[e]) : -1;
+      traces.push({type:"scatter",mode:"lines",x:[g.arc[E[2*e]],g.arc[E[2*e+1]]],y:[0,0],xaxis:"x",yaxis:"y2",line:{color:b>=0?RAMP[b]:"#b9b8b2",width:6},hoverinfo:"skip",showlegend:false}); }
+    if(ep) traces.push(edgeBar(ep,er,"scatter",{xaxis:"x",yaxis:"y2"}));
+    const nx=[],ny=[],ncd=[],sz=[]; for(let k=0;k<K;k++){ nx.push(g.arc[k]); ny.push(0); ncd.push([k,np.cnt[k],np.nout[k],np.val[k]]); sz.push(nsize(k)+3); }
+    traces.push({type:"scatter",mode:"markers",x:nx,y:ny,xaxis:"x",yaxis:"y2",customdata:ncd,hovertemplate:nht,marker:nodeMarker(sz),showlegend:false});
+    const shapes=[]; for(let k=0;k<K;k++) shapes.push({type:"line",xref:"x",yref:"y domain",x0:g.arc[k],x1:g.arc[k],y0:0,y1:1,line:{color:"#eeede8",width:1}});
+    if(Number.isFinite(cut) && yk==="score") shapes.push({type:"line",xref:"x domain",yref:"y",x0:0,x1:1,y0:cut,y1:cut,line:{color:"#e34948",width:1,dash:"dash"}});
+    layout={shapes, xaxis:{title:{text:"position along the curve (arc length)"},gridcolor:"#eeede8",zeroline:false,anchor:"y2"},
+      yaxis:{title:{text:ylab},gridcolor:"#eeede8",zeroline:false,domain:[0.3,1]}, yaxis2:{domain:[0,0.16],range:[-1,1],visible:false,fixedrange:true},
+      annotations:[{text:"the curve: nodes and edges",xref:"paper",yref:"paper",x:0,y:0.2,showarrow:false,font:{size:11,color:"#52514e"},xanchor:"left"}],
+      margin:{l:60,r:90,t:10,b:50},dragmode:"pan"};
+  } else {
+    const three = g.dim>=3 && m>=3; kind = three ? (g.dim>=4? "projection of a "+g.dim+"-D structure" : "3-D layout") : "planar layout";
+    let ax=[0,1,2]; if(three && g.dim>=4 && m>=4){ ax=$("gproj").value.split("").map(t=>+t-1); }
+    const nd=three?3:2, pos=(k,a)=>g.emb[k*m+ax[a]], T=three?"scatter3d":"scattergl";
+    const ep = ekey==="none" ? null : edgeProperty(g,ekey,pos,nd), er = ep ? ramp(ep.val) : null;
+    const groups = ep ? RAMP.map(()=>[]) : [[]]; const none=[];
+    for(let e=0;e<n;e++){ const b=ep? er.bin(ep.val[e]) : 0; (b>=0? groups[b] : none).push(e); }
+    const lineTrace=(list,color,width)=>{ const xs=[],ys=[],zs=[]; list.forEach(e=>{ const a=E[2*e], b=E[2*e+1]; xs.push(pos(a,0),pos(b,0),null); ys.push(pos(a,1),pos(b,1),null); if(three) zs.push(pos(a,2),pos(b,2),null); });
+      const t={type:T,mode:"lines",x:xs,y:ys,line:{color,width},hoverinfo:"skip",showlegend:false}; if(three) t.z=zs; return t; };
+    if(none.length) traces.push(lineTrace(none,"#dddcd6",three?2:1));
+    groups.forEach((list,b)=>{ if(list.length) traces.push(lineTrace(list, ep? RAMP[b] : "#b9b8b2", ep? (three?4:2) : (three?2:1))); });
+    if(ep){ const eb=edgeBar(ep,er,T); if(three) eb.z=[null]; traces.push(eb); }
+    // points at their position on the graph
+    const med=[]; for(let e=0;e<Math.min(n,2000);e++){ let q=0; for(let a=0;a<nd;a++){ const t=pos(E[2*e],a)-pos(E[2*e+1],a); q+=t*t; } med.push(Math.sqrt(q)); }
+    const jit=0.25*(median(med)||0.01);
+    const px=[],py=[],pz=[],cd=[],ox=[],oy=[],oz=[],ocd=[];
+    idx.forEach(i=>{ const a=v.node[i], b=v.toward[i], f=v.frac[i], c=[];
+      for(let q=0;q<nd;q++) c.push(pos(a,q)+f*(pos(b,q)-pos(a,q))+jit*(hash01(i,q+1)-0.5)*1.6);
+      if(r.out[i]){ ox.push(c[0]);oy.push(c[1]);if(three)oz.push(c[2]);ocd.push([i,sc[i]]); if(hl||only) return; } if(only) return; px.push(c[0]);py.push(c[1]);if(three)pz.push(c[2]);cd.push([i,sc[i]]); });
+    if(showPts && px.length){ const t={type:T,mode:"markers",x:px,y:py,customdata:cd,hovertemplate:ht,marker:{size:three?1.6:3,color:"#b9b8b2",opacity:three?0.5:0.6,line:{width:0}},showlegend:false}; if(three) t.z=pz; traces.push(t); }
+    const nx=[],ny=[],nz=[],ncd=[],sz=[]; for(let k=0;k<K;k++){ nx.push(pos(k,0)); ny.push(pos(k,1)); if(three) nz.push(pos(k,2)); ncd.push([k,np.cnt[k],np.nout[k],np.val[k]]); sz.push(three? nsize(k)*0.55 : nsize(k)); }
+    const nt={type:T,mode:"markers",x:nx,y:ny,customdata:ncd,hovertemplate:nht,marker:nodeMarker(sz),showlegend:false}; if(three){ nt.z=nz; nt.marker.line={width:0}; } traces.push(nt);
+    if(ox.length){ const t={type:T,mode:"markers",x:ox,y:oy,customdata:ocd,hovertemplate:ht,marker:{size:three?4.5:9,color:"#e34948",symbol:"diamond",line:{color:"#fff",width:0.5}},showlegend:false}; if(three) t.z=oz; traces.push(t); }
+    if(three){ const axn=a=>({title:{text:"intrinsic coordinate "+(ax[a]+1)},backgroundcolor:"#ffffff",gridcolor:"#eeede8",zerolinecolor:"#eeede8",color:"#52514e",showticklabels:false});
+      layout={scene:{aspectmode:"data",xaxis:axn(0),yaxis:axn(1),zaxis:axn(2)},margin:{l:0,r:0,t:0,b:0}}; }
+    else layout={xaxis:{visible:false},yaxis:{visible:false,scaleanchor:"x"},margin:{l:10,r:90,t:10,b:10},dragmode:"pan"};
   }
-  Plotly.react("plot", traces, Object.assign({margin:{l:is1d?60:10,r:10,t:10,b:is1d?50:10},paper_bgcolor:"#fcfcfb",plot_bgcolor:"#ffffff",uirevision:"g"+cur+"-"+sidSel,dragmode:"pan"},layout), {displaylogo:false,responsive:true,scrollZoom:true});
+  Plotly.react("plot", traces, Object.assign({paper_bgcolor:"#fcfcfb",plot_bgcolor:"#ffffff",uirevision:"g"+cur+"-"+sidSel+"-"+$("gproj").value},layout), {displaylogo:false,responsive:true,scrollZoom:true});
   $("outinfo").innerHTML = `<b>${r.nout.toLocaleString()}</b> outliers among ${r.nshown.toLocaleString()} points of this structure (${r.nshown? (100*r.nout/r.nshown).toFixed(2):"0"} %)<br><span class="kind">${meta.low?"low":"high"} values are outliers · ${Number.isFinite(cut)? "cut at "+cut.toPrecision(4) : r.info}</span>`;
-  $("status").textContent = `${v.name} · structure ${s.label}: ${s.dim}-D, ${K} nodes, ${idx.length.toLocaleString()} points · drag to pan, scroll to zoom`;
+  $("status").textContent = `${v.name} · structure ${s.label}: ${s.dim}-D, ${K} nodes, ${n} edges, ${idx.length.toLocaleString()} points · ${kind}`;
 }
 function setView(w){ view=w; document.body.className = w==="graph" ? "vgraph" : "v3d"; document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active", t.dataset.view===w)); Plotly.purge("plot"); draw(); }
 function draw3d(){
@@ -491,7 +574,7 @@ $("top").onclick=()=>setAll(s=>s.kind==="residual");
 $("version").onchange=()=>{ cur=+$("version").value; buildTree(); fillGraphSelect(); setThrRange(); draw(); };
 document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 refreshExtraOptions();
-["gstruct","gcolour","gpts","gy"].forEach(id=>$(id).addEventListener("input",draw));
+["gstruct","gcolour","gpts","gy","gedge","gproj","gsize"].forEach(id=>$(id).addEventListener("input",draw));
 $("xfile").addEventListener("change",ev=>{ const f=ev.target.files[0]; if(!f) return; const rd=new FileReader();
   rd.onload=()=>{ try{ loadExtraText(String(rd.result), f.name); }catch(err){ $("xinfo").textContent="Could not use "+f.name+": "+err.message; } };
   rd.readAsText(f); });

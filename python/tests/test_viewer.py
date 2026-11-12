@@ -10,7 +10,7 @@ pytest.importorskip("plotly")
 
 from examm import HierarchicalAGTM, ManifoldGraph, datasets  # noqa: E402
 from examm.crawling import crawl  # noqa: E402
-from examm.viewer import export_viewer, viewer_payload  # noqa: E402
+from examm.viewer import _graph_embedding, export_viewer, viewer_payload  # noqa: E402
 
 
 def small_hierarchy(rng):
@@ -77,3 +77,28 @@ def test_extra_labels_are_embedded(rng, tmp_path):
     assert '"name":"redshift"' in out.read_text() and 'id="xfile"' in out.read_text()
     with pytest.raises(ValueError):
         viewer_payload(X, {"a": H}, extra={"bad": z[:10]})
+
+
+def test_graph_embedding_unfolds_structures_in_their_own_dimension(rng):
+    # a curved surface: embedding distances follow the distances measured along the surface
+    u, v = rng.uniform(0, 2, (2, 6000))
+    g = crawl(np.c_[u, v, np.sin(2 * u)], 0.15, 2, seed=0)
+    emb, arc = _graph_embedding(g.nodes, g.edges, 2)
+    assert emb.shape == (g.n_nodes, 2) and len(arc) == 0
+    t = np.linspace(0, 2, 400)
+    s_of_u = np.interp(g.nodes[:, 0], t, np.r_[0, np.cumsum(np.hypot(np.diff(t), np.diff(np.sin(2 * t))))])
+    true = np.c_[s_of_u, g.nodes[:, 1]]
+    i, j = rng.integers(0, g.n_nodes, (2, 2000))
+    d_emb, d_true = np.linalg.norm(emb[i] - emb[j], axis=1), np.linalg.norm(true[i] - true[j], axis=1)
+    assert np.corrcoef(d_emb, d_true)[0, 1] > 0.95
+    lm, _ = _graph_embedding(g.nodes, g.edges, 2, max_landmarks=200)       # landmark variant agrees
+    assert np.corrcoef(np.linalg.norm(lm[i] - lm[j], axis=1), d_true)[0, 1] > 0.95
+    # an open curve gets an arc length; 3-D and 4-D structures get 3 and 4 coordinates
+    line = ManifoldGraph(np.c_[np.linspace(0, 3, 16), np.zeros(16), np.zeros(16)], [[k, k + 1] for k in range(15)], 1)
+    e1, a1 = _graph_embedding(line.nodes, line.edges, 1)
+    assert np.allclose(np.sort(a1), np.linspace(0, 3, 16)) and e1.shape == (16, 2)
+    assert _graph_embedding(g.nodes, g.edges, 3)[0].shape[1] == 3 and _graph_embedding(g.nodes, g.edges, 6)[0].shape[1] == 4
+    X, H = small_hierarchy(rng)
+    S = viewer_payload(X, {"a": H})["versions"][0]["structures"]
+    assert S[1]["m"] == 2 and all(k in S[1] for k in ("emb", "arc", "curv", "zeta", "degen", "noise"))
+    assert len(np.frombuffer(base64.b64decode(S[1]["curv"]), np.float32)) == 20
