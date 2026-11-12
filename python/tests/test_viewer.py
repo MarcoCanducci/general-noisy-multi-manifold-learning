@@ -107,3 +107,18 @@ def test_graph_embedding_unfolds_structures_in_their_own_dimension(rng):
     leaf = H.root_.children[0].children[0].model
     assert np.allclose(tri, leaf.covariances_[:, np.triu_indices(3)[0], np.triu_indices(3)[1]], rtol=1e-5, atol=1e-8)
     assert S[3]["cov"] == "" and S[3]["graph_of"] == 0
+
+
+def test_points_fill_the_layout_of_a_surface(rng):
+    from examm.viewer import _point_layout
+
+    # a flat lattice in the plane of a 5-D space, laid out by the identity: points must land on themselves
+    gx, gy = np.meshgrid(np.arange(6.0), np.arange(6.0), indexing="ij")
+    emb = np.c_[gx.ravel(), gy.ravel()]
+    means = np.c_[emb, np.zeros((36, 3))]
+    idx = np.arange(36).reshape(6, 6)
+    edges = np.r_[np.c_[idx[:-1].ravel(), idx[1:].ravel()], np.c_[idx[:, :-1].ravel(), idx[:, 1:].ravel()]]
+    P = np.c_[rng.uniform(0, 5, (200, 2)), rng.normal(0, 0.3, (200, 3))]     # off-plane noise is dropped
+    node = np.argmin(((P[:, None, :2] - emb[None]) ** 2).sum(-1), axis=1)
+    out = _point_layout(P, means, emb, edges, node, 2)
+    assert np.allclose(out, P[:, :2], atol=1e-8)
