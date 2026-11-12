@@ -173,6 +173,30 @@ def _point_layout(X, means, emb, edges, node, dim: int) -> np.ndarray:
     return out
 
 
+def _dimension_labels(H, n: int):
+    """Estimated dimensionality of every point, before and after spatial smoothing.
+
+    Read from the detection runs stored in ``H.detections_`` (a list of dicts with a fitted
+    ``learner`` and the ``region`` of rows it was run on); where a finer level examined a point
+    again its estimate replaces the coarser one. 0 marks points with no estimate: removed by
+    the preprocessing (thinning, density filter) or with too small a neighbourhood.
+    Returns ``None`` when the hierarchy holds no detection runs.
+    """
+    det = getattr(H, "detections_", None)
+    if not det:
+        return None
+    hard, smooth = np.zeros(n, dtype=np.int8), np.zeros(n, dtype=np.int8)
+    for d in sorted(det, key=lambda d: d.get("level", 0)):
+        L = d["learner"]
+        if getattr(L, "dim_result_", None) is None:
+            continue
+        rows = np.asarray(d["region"])[L.preprocess_.indices]
+        ok = L.dim_result_.index > 0
+        hard[rows[ok]] = L.dim_result_.index_hard[ok]
+        smooth[rows[ok]] = L.dim_result_.index[ok]
+    return hard, smooth
+
+
 def _version_payload(H, X, hops: int, min_region: int) -> dict:
     res = H.regional_deviation(X, hops=hops, min_region=min_region)
     leaves = H.leaves()
@@ -241,7 +265,10 @@ def _version_payload(H, X, hops: int, min_region: int) -> dict:
     counts = np.bincount(sid[sid >= 0], minlength=len(structures))
     for s in structures:
         s["points"] = int(counts[s["id"]])
+    idx = _dimension_labels(H, len(X))
     return {
+        "idxh": _b64(idx[0], np.int8) if idx else "",
+        "idxs": _b64(idx[1], np.int8) if idx else "",
         "structures": structures,
         "sid": _b64(sid, np.int16),
         "node": _b64(res["node"], np.int32),
@@ -366,7 +393,7 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <label for="version">Version</label><select id="version"></select>
   <h2>View</h2>
   <div class="row"><div><label for="ax0">x</label><select id="ax0"></select></div><div><label for="ax1">y</label><select id="ax1"></select></div><div><label for="ax2">z</label><select id="ax2"></select></div></div>
-  <label for="colour">Colour points by</label><select id="colour"></select>
+  <label for="colour">Colour points by</label><select id="colour"></select><div id="catlegend"></div>
   <div class="row"><div><label for="psize">Point size</label><input id="psize" type="range" min="1" max="6" step="0.5" value="2"></div>
   <div><label for="popac">Opacity</label><input id="popac" type="range" min="0.1" max="1" step="0.05" value="0.7"></div></div>
   <label class="check"><input type="checkbox" id="showpts" checked> points</label>
@@ -403,7 +430,7 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <h2>Extra labels</h2>
   <input type="file" id="xfile" accept=".csv,.tsv,.txt">
   <p class="hint">Load a CSV with a header line to colour by your own per-point values (numbers or categories): either one line per point in the original order, or with a column named <b>row</b> holding the point index. The file stays in your browser.</p>
-  <div id="xinfo" class="hint"></div><div id="catlegend"></div>
+  <div id="xinfo" class="hint"></div>
   <h2>Outliers</h2>
   <label for="score">Score</label><select id="score"></select>
   <label class="check"><input type="radio" name="mode" value="pct" checked> by percentile</label>
@@ -429,6 +456,7 @@ function colourOf(i){ if(i<PAL.length) return PAL[i]; const h=(i*137.508)%360; r
 const N=DATA.n, D=DATA.d, X=dec(DATA.X, Float32Array);
 const V = DATA.versions.map(v => ({name:v.name, summary:v.summary, sid:dec(v.sid,Int16Array), node:dec(v.node,Int32Array),
   toward:dec(v.toward,Int32Array), frac:dec(v.frac,Float32Array), ppos: v.ppos ? dec(v.ppos,Float32Array) : null, ppos2: v.ppos2 ? dec(v.ppos2,Float32Array) : null,
+  idxh: v.idxh ? dec(v.idxh,Int8Array) : null, idxs: v.idxs ? dec(v.idxs,Int8Array) : null,
   scores:Object.fromEntries(Object.entries(v.scores).map(([k,b])=>[k,dec(b,Float32Array)])),
   S:v.structures.map(s=>({...s, nodes:dec(s.nodes,Float32Array), edges:dec(s.edges,Int32Array), emb:dec(s.emb,Float32Array), emb2: s.emb2 ? dec(s.emb2,Float32Array) : null, arc:dec(s.arc,Float32Array), curv:dec(s.curv,Float32Array), zeta:dec(s.zeta,Float32Array), degen:dec(s.degen,Float32Array), noise:dec(s.noise,Float32Array), cov:dec(s.cov,Float32Array), on:s.kind!=="group", colour:colourOf(s.id)}))}));
 let view = "3d";
@@ -439,7 +467,7 @@ function extraOf(key){ return key && key.startsWith("x:") ? EXTRA[+key.slice(2)]
 function refreshExtraOptions(){
   const keep=(id,items)=>{ const el=$(id), old=el.value; fill(el, items); if(items.some(([v])=>v===old)) el.value=old; };
   const xs=EXTRA.map((e,i)=>["x:"+i, e.name+(e.kind==="cat"?" (categories)":"")]), xn=xs.filter((_,i)=>EXTRA[i].kind==="num");
-  keep("colour", [["structure","structure"],["dim","dimension of the structure"]].concat(DATA.scores.map(s=>[s.key,s.label]), xs));
+  keep("colour", [["structure","structure"],["dim","dimension of the structure"],["idxh","estimated dimensionality, before smoothing"],["idxs","estimated dimensionality, after smoothing"]].concat(DATA.scores.map(s=>[s.key,s.label]), xs));
   keep("gcolour", [["count","points per node"],["median","median of the outlier score"],["nout","outliers per node"],["deg","node degree"],["curv","curvature at the node"],["noise","noise scale of the node"],["zeta","covariance scale zeta"],["degen","degenerate components"]].concat(DATA.names.map((n,i)=>["pc:"+i,"mean "+n]), xn.map(([v,t])=>[v,"mean "+t])));
   keep("gy", [["score","the outlier score"]].concat(DATA.names.map((n,i)=>["pc:"+i,n]), xn));
 }
@@ -533,7 +561,11 @@ function compute(only){
 function seqColour(vals){ // single-hue ramp, robust range
   const f=vals.filter(Number.isFinite); const lo=quantile(f,0.02), hi=quantile(f,0.98); return {cmin:lo,cmax:hi}; }
 function draw(){ buildDimToggles(); catLegend(); if(view==="graph") drawGraph(); else draw3d(); }
-function catLegend(){ const e=extraOf($("colour").value), box=$("catlegend"); box.innerHTML="";
+function catLegend(){ const cm=$("colour").value, e=extraOf(cm), box=$("catlegend"); box.innerHTML="";
+  if(cm==="idxh"||cm==="idxs"||cm==="dim"){ const a=V[cur][cm], cnt=new Array(9).fill(0);
+    if(cm==="dim"){ for(let i=0;i<N;i++) cnt[Math.min(V[cur].S[V[cur].sid[i]]?.dim||0,8)]++; } else if(a){ for(let i=0;i<N;i++) cnt[Math.min(a[i],8)]++; } else { box.textContent="No dimensionality estimates are stored for this version."; return; }
+    cnt.forEach((c,d)=>{ if(!c) return; const sp=document.createElement("span"), sw=document.createElement("span"); sw.className="sw"; sw.style.background=DIMCOL[d];
+      sp.append(sw, document.createTextNode((d? d+"-D" : (cm==="dim"?"none":"not estimated"))+" ("+c.toLocaleString()+")")); box.appendChild(sp); }); return; }
   if(!e||e.kind!=="cat"||view==="graph") return;
   e.cats.forEach((t,k)=>{ const sp=document.createElement("span"), sw=document.createElement("span"); sw.className="sw"; sw.style.background=colourOf(k); sp.append(sw, document.createTextNode(t)); box.appendChild(sp); }); }
 function buildDimToggles(){
@@ -642,11 +674,11 @@ function drawGraph(){
     // points at their position on the graph
     const med=[]; for(let e=0;e<Math.min(n,2000);e++){ let q=0; for(let a=0;a<nd;a++){ const t=pos(E[2*e],a)-pos(E[2*e+1],a); q+=t*t; } med.push(Math.sqrt(q)); }
     const jit=0.25*(median(med)||0.01), fill=cloud || ($("gfill").checked && v.ppos);
-    const px=[],py=[],pz=[],cd=[],ox=[],oy=[],oz=[],ocd=[];
+    const px=[],py=[],pz=[],cd=[],ox=[],oy=[],oz=[],ocd=[],pcol=[], pidx = ($("colour").value==="idxh"||$("colour").value==="idxs") ? v[$("colour").value] : null;
     idx.forEach(i=>{ const a=v.node[i], b=v.toward[i], f=v.frac[i], c=[];
       for(let q=0;q<nd;q++) c.push(fill ? PP[i*4+ax[q]] : pos(a,q)+f*(pos(b,q)-pos(a,q))+jit*(hash01(i,q+1)-0.5)*1.6);
-      if(r.out[i]){ ox.push(c[0]);oy.push(c[1]);if(three)oz.push(c[2]);ocd.push([i,sc[i]]); if(hl||only) return; } if(only) return; px.push(c[0]);py.push(c[1]);if(three)pz.push(c[2]);cd.push([i,sc[i]]); });
-    if(showPts && px.length){ const t={type:T,mode:"markers",x:px,y:py,customdata:cd,hovertemplate:ht,marker:{size:three?1.6:3,color:"#b9b8b2",opacity:three?0.5:0.6,line:{width:0}},showlegend:false}; if(three) t.z=pz; traces.push(t); }
+      if(r.out[i]){ ox.push(c[0]);oy.push(c[1]);if(three)oz.push(c[2]);ocd.push([i,sc[i]]); if(hl||only) return; } if(only) return; px.push(c[0]);py.push(c[1]);if(three)pz.push(c[2]);cd.push([i,sc[i]]); if(pidx) pcol.push(DIMCOL[Math.min(pidx[i],8)]); });
+    if(showPts && px.length){ const t={type:T,mode:"markers",x:px,y:py,customdata:cd,hovertemplate:ht,marker:{size:three?(pidx?2.2:1.6):3,color:pidx?pcol:"#b9b8b2",opacity:pidx?0.85:(three?0.5:0.6),line:{width:0}},showlegend:false}; if(three) t.z=pz; traces.push(t); }
     const nx=[],ny=[],nz=[],ncd=[],sz=[]; for(let k=0;k<K;k++){ nx.push(pos(k,0)); ny.push(pos(k,1)); if(three) nz.push(pos(k,2)); ncd.push([k,np.cnt[k],np.nout[k],np.val[k]]); sz.push(three? nsize(k)*0.55 : nsize(k)); }
     const nt={type:T,mode:"markers",x:nx,y:ny,customdata:ncd,hovertemplate:nht,marker:nodeMarker(sz),showlegend:false}; if(three){ nt.z=nz; nt.marker.line={width:0}; } traces.push(nt);
     if(ox.length){ const t={type:T,mode:"markers",x:ox,y:oy,customdata:ocd,hovertemplate:ht,marker:{size:three?4.5:9,color:"#e34948",symbol:"diamond",line:{color:"#fff",width:0.5}},showlegend:false}; if(three) t.z=oz; traces.push(t); }
@@ -729,14 +761,14 @@ function draw3d(){
   const ax = three ? [+$("ax0").value,+$("ax1").value,+$("ax2").value] : [+$("ax0").value,+$("ax1").value], nd=ax.length, T=three?"scatter3d":"scattergl";
   if(lastThree!==three){ Plotly.purge("plot"); lastThree=three; }
   const r=compute(); lastOut=r;
-  const only=$("only").checked, hl=$("hl").checked, sc=v.scores[$("score").value], xe=extraOf(cm);
+  const only=$("only").checked, hl=$("hl").checked, sc=v.scores[$("score").value], xe=extraOf(cm), isIdx = cm==="idxh"||cm==="idxs";
   const P=[[],[],[]], O=[[],[],[]], pc=[], cd=[], ocd=[];
   for(let i=0;i<N;i++){
     if(!r.shown[i]) continue; const b=i*D, isOut=r.out[i]===1;
     if(isOut && (hl||only)){ for(let a=0;a<nd;a++) O[a].push(X[b+ax[a]]); ocd.push([i,v.S[v.sid[i]].label,sc[i]]); if(hl) continue; }
     if(only) continue;
     for(let a=0;a<nd;a++) P[a].push(X[b+ax[a]]); cd.push([i,v.S[v.sid[i]].label,sc[i]]);
-    if(cm==="structure") pc.push(v.S[v.sid[i]].colour); else if(cm==="dim") pc.push(DIMCOL[Math.min(v.S[v.sid[i]].dim,8)]);
+    if(cm==="structure") pc.push(v.S[v.sid[i]].colour); else if(cm==="dim") pc.push(DIMCOL[Math.min(v.S[v.sid[i]].dim,8)]); else if(isIdx) pc.push(v[cm] ? DIMCOL[Math.min(v[cm][i],8)] : DIMCOL[0]);
     else if(xe) pc.push(xe.kind==="num" ? xe.values[i] : (xe.values[i]<0 ? "#b9b8b2" : colourOf(xe.values[i]))); else pc.push(v.scores[cm][i]);
   }
   const traces=[], put=(t,A)=>{ t.x=A[0]; t.y=A[1]; if(three) t.z=A[2]; return t; };
@@ -745,7 +777,7 @@ function draw3d(){
   if(!three) dens.traces.forEach(t=>traces.push(t));
   if($("showpts").checked && P[0].length){
     const marker={size:+$("psize").value+(three?0:1), opacity:+$("popac").value, color:pc, line:{width:0}};
-    if(cm!=="structure" && cm!=="dim" && !(xe && xe.kind==="cat")){ const rg=seqColour(pc); Object.assign(marker,{colorscale:"Blues",reversescale:true,cmin:rg.cmin,cmax:rg.cmax,
+    if(cm!=="structure" && cm!=="dim" && !isIdx && !(xe && xe.kind==="cat")){ const rg=seqColour(pc); Object.assign(marker,{colorscale:"Blues",reversescale:true,cmin:rg.cmin,cmax:rg.cmax,
       colorbar:{title:{text: xe ? xe.name : DATA.scores.find(s=>s.key===cm).label,side:"right"},thickness:12,len:0.6}}); }
     traces.push(put({type:T,mode:"markers",customdata:cd,hovertemplate:ht,marker,name:"points",showlegend:false},P));
   }

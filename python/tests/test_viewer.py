@@ -134,3 +134,21 @@ def test_cloud_embedding_recovers_a_flat_sheet(rng):
     d_true = np.linalg.norm(P[:200, None, :2] - P[None, :200, :2], axis=-1)
     d_emb = np.linalg.norm(p[:200, None] - p[None, :200], axis=-1)
     assert np.corrcoef(d_true.ravel(), d_emb.ravel())[0, 1] > 0.98
+
+
+def test_dimension_labels_follow_the_detection_runs(rng):
+    import examm
+    from examm.viewer import _dimension_labels, viewer_payload
+
+    X = np.r_[np.c_[rng.uniform(0, 3, (900, 2)), rng.normal(0, 0.01, 900)], rng.uniform(-1, 4, (60, 3))]
+    H = examm.build_hierarchy(X, [0.3], dims=[[1, 2]], random_state=0)
+    hard, smooth = _dimension_labels(H, len(X))
+    L = H.detections_[0]["learner"]
+    assert np.array_equal(smooth[L.preprocess_.indices], L.dim_result_.index)
+    assert np.array_equal(hard[L.preprocess_.indices], L.dim_result_.index_hard * (L.dim_result_.index > 0))
+    removed = np.setdiff1d(np.arange(len(X)), L.preprocess_.indices)
+    assert not hard[removed].any() and not smooth[removed].any()
+    v = viewer_payload(X, {"a": H})["versions"][0]
+    assert v["idxh"] and v["idxs"]
+    del H.detections_
+    assert _dimension_labels(H, len(X)) is None
