@@ -122,3 +122,15 @@ def test_points_fill_the_layout_of_a_surface(rng):
     node = np.argmin(((P[:, None, :2] - emb[None]) ** 2).sum(-1), axis=1)
     out = _point_layout(P, means, emb, edges, node, 2)
     assert np.allclose(out, P[:, :2], atol=1e-8)
+
+
+def test_cloud_embedding_recovers_a_flat_sheet(rng):
+    from examm.viewer import _cloud_embedding
+
+    P = np.c_[rng.uniform(0, 4, (1500, 2)), np.zeros((1500, 3))]
+    means = np.c_[np.array([[1.0, 1.0], [3.0, 1.0], [1.0, 3.0], [3.0, 3.0]]), np.zeros((4, 3))]
+    e, p = _cloud_embedding(means, np.array([[0, 1], [2, 3]]), P, 2, max_landmarks=300)
+    assert e.shape == (4, 2) and p.shape == (1500, 2)
+    d_true = np.linalg.norm(P[:200, None, :2] - P[None, :200, :2], axis=-1)
+    d_emb = np.linalg.norm(p[:200, None] - p[None, :200], axis=-1)
+    assert np.corrcoef(d_true.ravel(), d_emb.ravel())[0, 1] > 0.98

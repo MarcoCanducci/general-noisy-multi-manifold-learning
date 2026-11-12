@@ -85,6 +85,50 @@ def _graph_embedding(means: np.ndarray, edges: np.ndarray, dim: int, max_landmar
     return out, arc
 
 
+def _cloud_embedding(means: np.ndarray, edges: np.ndarray, P: np.ndarray, dim: int, k: int = 8,
+                     max_landmarks: int = 1000, seed: int = 0):
+    """Intrinsic coordinates of a structure measured through its data points.
+
+    Nodes and points are joined in one neighbourhood graph (``k`` nearest neighbours plus the
+    graph's own edges) and unfolded together by landmark Isomap. Unlike :func:`_graph_embedding`
+    the layout does not depend on which edges the graph has, so points fill the structure and
+    missing edges show as gaps in the graph rather than gaps in the picture.
+    Returns the layout of the nodes and of the points.
+    """
+    from scipy.linalg import eigh
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import shortest_path
+    from scipy.spatial import cKDTree
+
+    K, m = len(means), int(min(max(dim, 2), 4))
+    Z = np.vstack([means, P])
+    n = len(Z)
+    if n <= m + 1:
+        return np.zeros((K, m)), np.zeros((len(P), m))
+    kk = min(k, n - 1)
+    dist, nb = cKDTree(Z).query(Z, k=kk + 1)
+    i = np.repeat(np.arange(n), kk)
+    j, w = nb[:, 1:].ravel(), dist[:, 1:].ravel()
+    edges = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
+    i, j = np.r_[i, edges[:, 0]], np.r_[j, edges[:, 1]]
+    w = np.r_[w, np.linalg.norm(means[edges[:, 0]] - means[edges[:, 1]], axis=1)] + 1e-12
+    A = coo_matrix((w, (i, j)), shape=(n, n)).tocsr()
+    A = A.maximum(A.T)
+    land = np.arange(n) if n <= max_landmarks else np.sort(np.random.default_rng(seed).choice(n, max_landmarks, replace=False))
+    Dl = shortest_path(A, method="D", directed=False, indices=land)
+    finite = np.isfinite(Dl)
+    Dl[~finite] = 1.5 * Dl[finite].max() if finite.any() else 1.0
+    D2 = Dl[:, land] ** 2
+    L = len(land)
+    J = np.eye(L) - 1.0 / L
+    vals, vecs = eigh(-0.5 * J @ D2 @ J, subset_by_index=[max(L - m, 0), L - 1])
+    vals, vecs = np.maximum(vals[::-1], 1e-12), vecs[:, ::-1]
+    emb = (-0.5 * (vecs / np.sqrt(vals)).T @ (Dl ** 2 - D2.mean(1, keepdims=True))).T
+    out = np.zeros((n, m))
+    out[:, :emb.shape[1]] = emb
+    return out[:K], out[K:]
+
+
 def _point_layout(X, means, emb, edges, node, dim: int) -> np.ndarray:
     """Positions of data points in the intrinsic layout of their graph.
 
@@ -172,6 +216,7 @@ def _version_payload(H, X, hops: int, min_region: int) -> dict:
     sid = lookup[res["leaf"]]
     # where every point is drawn on the graph page: up to four intrinsic coordinates
     ppos = np.zeros((len(X), 4), dtype=np.float32)
+    ppos2 = np.zeros((len(X), 4), dtype=np.float32)
     graph_of = np.array([s["graph_of"] for s in structures] + [-1])
     gid = graph_of[sid]
     models = {node_id[k]: None for k in node_id if not isinstance(k, tuple)}
@@ -189,6 +234,10 @@ def _version_payload(H, X, hops: int, min_region: int) -> dict:
         emb = _graph_embedding(model.means_, model.graph.edges, int(model.graph.dim))[0]
         ppos[rows, :emb.shape[1]] = _point_layout(X[rows], model.means_, emb, model.graph.edges,
                                                   np.asarray(res["node"])[rows], int(model.graph.dim))
+        if int(model.graph.dim) >= 2:
+            e2, p2 = _cloud_embedding(model.means_, model.graph.edges, X[rows], int(model.graph.dim))
+            structures[g_]["emb2"] = _b64(e2, np.float32)
+            ppos2[rows, :p2.shape[1]] = p2
     counts = np.bincount(sid[sid >= 0], minlength=len(structures))
     for s in structures:
         s["points"] = int(counts[s["id"]])
@@ -199,6 +248,7 @@ def _version_payload(H, X, hops: int, min_region: int) -> dict:
         "toward": _b64(res["toward"], np.int32),
         "frac": _b64(res["fraction"], np.float32),
         "ppos": _b64(ppos, np.float32),
+        "ppos2": _b64(ppos2, np.float32),
         "scores": {"logdens": _b64(H.score_samples(X), np.float32), "dist": _b64(res["distance"], np.float32),
                    "d2": _b64(res["d2"], np.float32), "pval": _b64(res["p_value"], np.float32),
                    "rank": _b64(res["regional_rank"], np.float32), "bg": _b64(res["background_probability"], np.float32)},
@@ -329,10 +379,11 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <div id="gprojwrap" style="display:none"><label for="gproj">Projection (three of the four intrinsic coordinates)</label><select id="gproj"><option value="123">coordinates 1, 2, 3</option><option value="124">coordinates 1, 2, 4</option><option value="134">coordinates 1, 3, 4</option><option value="234">coordinates 2, 3, 4</option></select></div>
   <label class="check"><input type="checkbox" id="gsize" checked> node size by number of points</label>
   <label for="gy">Vertical axis (curves)</label><select id="gy"></select>
+  <label for="glayout">Layout (surfaces and higher)</label><select id="glayout"><option value="cloud">unfolded through the data points</option><option value="graph">unfolded along the graph edges</option></select>
   <label class="check"><input type="checkbox" id="gpts" checked> points of the structure</label>
   <label class="check"><input type="checkbox" id="gfill" checked> fill the structure (points at their own position)</label>
   <label class="check"><input type="checkbox" id="gloc" checked> locator: where the structure sits in the data</label>
-  <p class="hint">Each structure is drawn in its own dimension, unfolded along its graph (geodesic distances along the edges): a curve as a line with a profile above it, a surface in the plane, a 3-D structure in space, a 4-D one through 3-D projections. Points are drawn at their own position within the structure (their offset from the nearest node, along the structure, carried into the layout); untick "fill the structure" to snap them onto the nearest edge instead.</p>
+  <p class="hint">Each structure is drawn in its own dimension, unfolded along its graph (geodesic distances along the edges): a curve as a line with a profile above it, a surface in the plane, a 3-D structure in space, a 4-D one through 3-D projections. Two layouts: "through the data points" unfolds nodes and original data points together (distances through the point cloud), so points fill the structure and missing edges show as gaps in the graph; "along the graph edges" unfolds the graph alone and places each point by its offset from the nearest node, which pulls apart branches that the graph does not connect.</p>
   </div>
   <h2>Structures</h2>
   <div id="dimtog"></div>
@@ -377,9 +428,9 @@ function dec(b64, T){ if(!b64) return new T(0); const s=atob(b64), u=new Uint8Ar
 function colourOf(i){ if(i<PAL.length) return PAL[i]; const h=(i*137.508)%360; return `hsl(${h.toFixed(0)},62%,${i%2?44:56}%)`; }
 const N=DATA.n, D=DATA.d, X=dec(DATA.X, Float32Array);
 const V = DATA.versions.map(v => ({name:v.name, summary:v.summary, sid:dec(v.sid,Int16Array), node:dec(v.node,Int32Array),
-  toward:dec(v.toward,Int32Array), frac:dec(v.frac,Float32Array), ppos: v.ppos ? dec(v.ppos,Float32Array) : null,
+  toward:dec(v.toward,Int32Array), frac:dec(v.frac,Float32Array), ppos: v.ppos ? dec(v.ppos,Float32Array) : null, ppos2: v.ppos2 ? dec(v.ppos2,Float32Array) : null,
   scores:Object.fromEntries(Object.entries(v.scores).map(([k,b])=>[k,dec(b,Float32Array)])),
-  S:v.structures.map(s=>({...s, nodes:dec(s.nodes,Float32Array), edges:dec(s.edges,Int32Array), emb:dec(s.emb,Float32Array), arc:dec(s.arc,Float32Array), curv:dec(s.curv,Float32Array), zeta:dec(s.zeta,Float32Array), degen:dec(s.degen,Float32Array), noise:dec(s.noise,Float32Array), cov:dec(s.cov,Float32Array), on:s.kind!=="group", colour:colourOf(s.id)}))}));
+  S:v.structures.map(s=>({...s, nodes:dec(s.nodes,Float32Array), edges:dec(s.edges,Int32Array), emb:dec(s.emb,Float32Array), emb2: s.emb2 ? dec(s.emb2,Float32Array) : null, arc:dec(s.arc,Float32Array), curv:dec(s.curv,Float32Array), zeta:dec(s.zeta,Float32Array), degen:dec(s.degen,Float32Array), noise:dec(s.noise,Float32Array), cov:dec(s.cov,Float32Array), on:s.kind!=="group", colour:colourOf(s.id)}))}));
 let view = "3d";
 const TRI = D*(D+1)/2;
 let lastThree = null;
@@ -578,7 +629,8 @@ function drawGraph(){
   } else {
     const three = g.dim>=3 && m>=3; kind = three ? (g.dim>=4? "projection of a "+g.dim+"-D structure" : "3-D layout") : "planar layout";
     let ax=[0,1,2]; if(three && g.dim>=4 && m>=4){ ax=$("gproj").value.split("").map(t=>+t-1); }
-    const nd=three?3:2, pos=(k,a)=>g.emb[k*m+ax[a]], T=three?"scatter3d":"scattergl";
+    const cloud = $("glayout").value==="cloud" && g.emb2 && v.ppos2, EMB = cloud ? g.emb2 : g.emb, PP = cloud ? v.ppos2 : v.ppos;
+    const nd=three?3:2, pos=(k,a)=>EMB[k*m+ax[a]], T=three?"scatter3d":"scattergl";
     const ep = ekey==="none" ? null : edgeProperty(g,ekey,pos,nd), er = ep ? ramp(ep.val) : null;
     const groups = ep ? RAMP.map(()=>[]) : [[]]; const none=[];
     for(let e=0;e<n;e++){ const b=ep? er.bin(ep.val[e]) : 0; (b>=0? groups[b] : none).push(e); }
@@ -589,10 +641,10 @@ function drawGraph(){
     if(ep){ const eb=edgeBar(ep,er,T); if(three) eb.z=[null]; traces.push(eb); }
     // points at their position on the graph
     const med=[]; for(let e=0;e<Math.min(n,2000);e++){ let q=0; for(let a=0;a<nd;a++){ const t=pos(E[2*e],a)-pos(E[2*e+1],a); q+=t*t; } med.push(Math.sqrt(q)); }
-    const jit=0.25*(median(med)||0.01), fill=$("gfill").checked && v.ppos;
+    const jit=0.25*(median(med)||0.01), fill=cloud || ($("gfill").checked && v.ppos);
     const px=[],py=[],pz=[],cd=[],ox=[],oy=[],oz=[],ocd=[];
     idx.forEach(i=>{ const a=v.node[i], b=v.toward[i], f=v.frac[i], c=[];
-      for(let q=0;q<nd;q++) c.push(fill ? v.ppos[i*4+ax[q]] : pos(a,q)+f*(pos(b,q)-pos(a,q))+jit*(hash01(i,q+1)-0.5)*1.6);
+      for(let q=0;q<nd;q++) c.push(fill ? PP[i*4+ax[q]] : pos(a,q)+f*(pos(b,q)-pos(a,q))+jit*(hash01(i,q+1)-0.5)*1.6);
       if(r.out[i]){ ox.push(c[0]);oy.push(c[1]);if(three)oz.push(c[2]);ocd.push([i,sc[i]]); if(hl||only) return; } if(only) return; px.push(c[0]);py.push(c[1]);if(three)pz.push(c[2]);cd.push([i,sc[i]]); });
     if(showPts && px.length){ const t={type:T,mode:"markers",x:px,y:py,customdata:cd,hovertemplate:ht,marker:{size:three?1.6:3,color:"#b9b8b2",opacity:three?0.5:0.6,line:{width:0}},showlegend:false}; if(three) t.z=pz; traces.push(t); }
     const nx=[],ny=[],nz=[],ncd=[],sz=[]; for(let k=0;k<K;k++){ nx.push(pos(k,0)); ny.push(pos(k,1)); if(three) nz.push(pos(k,2)); ncd.push([k,np.cnt[k],np.nout[k],np.val[k]]); sz.push(three? nsize(k)*0.55 : nsize(k)); }
@@ -602,7 +654,7 @@ function drawGraph(){
       layout={scene:{aspectmode:"data",xaxis:axn(0),yaxis:axn(1),zaxis:axn(2)},margin:{l:0,r:0,t:0,b:0}}; }
     else layout={xaxis:{visible:false},yaxis:{visible:false,scaleanchor:"x"},margin:{l:10,r:90,t:10,b:10},dragmode:"pan"};
   }
-  Plotly.react("plot", traces, Object.assign({paper_bgcolor:"#fcfcfb",plot_bgcolor:"#ffffff",uirevision:"g"+cur+"-"+sidSel+"-"+$("gproj").value},layout), {displaylogo:false,responsive:true,scrollZoom:true});
+  Plotly.react("plot", traces, Object.assign({paper_bgcolor:"#fcfcfb",plot_bgcolor:"#ffffff",uirevision:"g"+cur+"-"+sidSel+"-"+$("gproj").value+$("glayout").value},layout), {displaylogo:false,responsive:true,scrollZoom:true});
   drawLocator(v,s,idx,r);
   $("outinfo").innerHTML = `<b>${r.nout.toLocaleString()}</b> outliers among ${r.nshown.toLocaleString()} points of this structure (${r.nshown? (100*r.nout/r.nshown).toFixed(2):"0"} %)<br><span class="kind">${meta.low?"low":"high"} values are outliers · ${Number.isFinite(cut)? "cut at "+cut.toPrecision(4) : r.info}</span>`;
   $("status").textContent = `${v.name} · structure ${s.label}: ${s.dim}-D, ${K} nodes, ${n} edges, ${idx.length.toLocaleString()} points · ${kind}`;
@@ -728,7 +780,7 @@ $("top").onclick=()=>setAll(s=>s.kind==="residual");
 $("version").onchange=()=>{ cur=+$("version").value; buildTree(); fillGraphSelect(); setThrRange(); draw(); };
 document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>setView(t.dataset.view)));
 refreshExtraOptions();
-["gstruct","gcolour","gpts","gfill","gloc","gy","gedge","gproj","gsize","isomode","isores"].forEach(id=>$(id).addEventListener("input",draw));
+["gstruct","gcolour","glayout","gpts","gfill","gloc","gy","gedge","gproj","gsize","isomode","isores"].forEach(id=>$(id).addEventListener("input",draw));
 document.querySelectorAll(".isolvl").forEach(e=>e.addEventListener("change",draw));
 $("xfile").addEventListener("change",ev=>{ const f=ev.target.files[0]; if(!f) return; const rd=new FileReader();
   rd.onload=()=>{ try{ loadExtraText(String(rd.result), f.name); }catch(err){ $("xinfo").textContent="Could not use "+f.name+": "+err.message; } };
