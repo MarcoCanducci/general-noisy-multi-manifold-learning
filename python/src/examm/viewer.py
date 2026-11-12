@@ -566,7 +566,7 @@ function catLegend(){ const cm=$("colour").value, e=extraOf(cm), box=$("catlegen
     if(cm==="dim"){ for(let i=0;i<N;i++) cnt[Math.min(V[cur].S[V[cur].sid[i]]?.dim||0,8)]++; } else if(a){ for(let i=0;i<N;i++) cnt[Math.min(a[i],8)]++; } else { box.textContent="No dimensionality estimates are stored for this version."; return; }
     cnt.forEach((c,d)=>{ if(!c) return; const sp=document.createElement("span"), sw=document.createElement("span"); sw.className="sw"; sw.style.background=DIMCOL[d];
       sp.append(sw, document.createTextNode((d? d+"-D" : (cm==="dim"?"none":"not estimated"))+" ("+c.toLocaleString()+")")); box.appendChild(sp); }); return; }
-  if(!e||e.kind!=="cat"||view==="graph") return;
+  if(!e||e.kind!=="cat") return;
   e.cats.forEach((t,k)=>{ const sp=document.createElement("span"), sw=document.createElement("span"); sw.className="sw"; sw.style.background=colourOf(k); sp.append(sw, document.createTextNode(t)); box.appendChild(sp); }); }
 function buildDimToggles(){
   const v=V[cur], box=$("dimtog"); box.innerHTML="";
@@ -591,6 +591,16 @@ const RAMPSCALE=RAMP.map((c,i)=>[i/(RAMP.length-1),c]);
 function ramp(vals){ const f=Array.from(vals).filter(Number.isFinite); if(!f.length) return {lo:0,hi:1,bin:()=>-1};
   let lo=quantile(f,0.02), hi=quantile(f,0.98); if(!(hi>lo)){ lo=Math.min(...f); hi=Math.max(...f); if(!(hi>lo)) hi=lo+1e-9; }
   return {lo,hi,bin:x=>Number.isFinite(x)? Math.max(0,Math.min(RAMP.length-1,Math.floor((x-lo)/(hi-lo)*RAMP.length))) : -1}; }
+function graphPointColour(v,idx,nr){
+  // colours of the structure's points on the graph page, following "Colour points by"; null = plain
+  const cm=$("colour").value, e=extraOf(cm);
+  if(cm==="idxh"||cm==="idxs") return v[cm] ? {f:i=>DIMCOL[Math.min(v[cm][i],8)], marker:{}} : null;
+  if(e && e.kind==="cat") return {f:i=> e.values[i]<0 ? "#b9b8b2" : colourOf(e.values[i]), marker:{}};
+  const vals = e ? e.values : v.scores[cm]; if(!vals) return null;
+  // same scale as the nodes when they show the mean of the same property
+  const rg = $("gcolour").value===cm ? nr : ramp(idx.map(i=>vals[i]));
+  return {f:i=>vals[i], marker:{colorscale:RAMPSCALE,cmin:rg.lo,cmax:rg.hi}};
+}
 function nodeProperty(v,g,idx,r,sc,cm,meta){
   const K=g.n_nodes, E=g.edges, n=E.length/2, cnt=new Float64Array(K), nout=new Float64Array(K), val=new Array(K).fill(NaN); let title="";
   idx.forEach(i=>{ cnt[v.node[i]]++; if(r.out[i]) nout[v.node[i]]++; });
@@ -639,12 +649,12 @@ function drawGraph(){
     kind="curve";
     const pos=(k,a)=> a===0 ? g.arc[k] : 0, ep = ekey==="none" ? null : edgeProperty(g,ekey,pos,1), er = ep ? ramp(ep.val) : null;
     const elen=(a,b)=>{ let q=0; for(let k=0;k<D;k++){ const t=P[a*D+k]-P[b*D+k]; q+=t*t; } return Math.sqrt(q); };
-    const px=[],py=[],cd=[],ox=[],oy=[],ocd=[];
+    const px=[],py=[],cd=[],ox=[],oy=[],ocd=[],pcol=[],gpc=graphPointColour(v,idx,nr);
     const yk=$("gy").value, yf = yk==="score" ? (i=>sc[i]) : pointValue(yk), ylab = yk==="score" ? meta.label : (yk.startsWith("pc:") ? DATA.names[+yk.slice(3)] : extraOf(yk).name);
     idx.forEach(i=>{ const a=v.node[i], b=v.toward[i]; const x=g.arc[a]+Math.sign(g.arc[b]-g.arc[a])*v.frac[i]*elen(a,b), y=yf(i);
       if(!Number.isFinite(y)) return;
-      if(r.out[i]){ ox.push(x);oy.push(y);ocd.push([i,sc[i]]); if(hl||only) return; } if(only) return; px.push(x);py.push(y);cd.push([i,sc[i]]); });
-    if(showPts) traces.push({type:"scattergl",mode:"markers",x:px,y:py,customdata:cd,hovertemplate:ht,marker:{size:5,color:s.colour,opacity:0.7},showlegend:false});
+      if(r.out[i]){ ox.push(x);oy.push(y);ocd.push([i,sc[i]]); if(hl||only) return; } if(only) return; px.push(x);py.push(y);cd.push([i,sc[i]]); if(gpc) pcol.push(gpc.f(i)); });
+    if(showPts) traces.push({type:"scattergl",mode:"markers",x:px,y:py,customdata:cd,hovertemplate:ht,marker:{...(gpc?gpc.marker:{}),size:5,color:gpc?pcol:s.colour,opacity:0.7},showlegend:false});
     if(ox.length) traces.push({type:"scattergl",mode:"markers",x:ox,y:oy,customdata:ocd,hovertemplate:ht,marker:{size:9,color:"#e34948",symbol:"diamond",line:{color:"#fff",width:0.5}},showlegend:false});
     // the curve itself as a line: one segment per edge, nodes on top
     for(let e=0;e<n;e++){ const b=ep? er.bin(ep.val[e]) : -1;
@@ -674,11 +684,11 @@ function drawGraph(){
     // points at their position on the graph
     const med=[]; for(let e=0;e<Math.min(n,2000);e++){ let q=0; for(let a=0;a<nd;a++){ const t=pos(E[2*e],a)-pos(E[2*e+1],a); q+=t*t; } med.push(Math.sqrt(q)); }
     const jit=0.25*(median(med)||0.01), fill=cloud || ($("gfill").checked && v.ppos);
-    const px=[],py=[],pz=[],cd=[],ox=[],oy=[],oz=[],ocd=[],pcol=[], pidx = ($("colour").value==="idxh"||$("colour").value==="idxs") ? v[$("colour").value] : null;
+    const px=[],py=[],pz=[],cd=[],ox=[],oy=[],oz=[],ocd=[],pcol=[], pidx = graphPointColour(v,idx,nr);
     idx.forEach(i=>{ const a=v.node[i], b=v.toward[i], f=v.frac[i], c=[];
       for(let q=0;q<nd;q++) c.push(fill ? PP[i*4+ax[q]] : pos(a,q)+f*(pos(b,q)-pos(a,q))+jit*(hash01(i,q+1)-0.5)*1.6);
-      if(r.out[i]){ ox.push(c[0]);oy.push(c[1]);if(three)oz.push(c[2]);ocd.push([i,sc[i]]); if(hl||only) return; } if(only) return; px.push(c[0]);py.push(c[1]);if(three)pz.push(c[2]);cd.push([i,sc[i]]); if(pidx) pcol.push(DIMCOL[Math.min(pidx[i],8)]); });
-    if(showPts && px.length){ const t={type:T,mode:"markers",x:px,y:py,customdata:cd,hovertemplate:ht,marker:{size:three?(pidx?2.2:1.6):3,color:pidx?pcol:"#b9b8b2",opacity:pidx?0.85:(three?0.5:0.6),line:{width:0}},showlegend:false}; if(three) t.z=pz; traces.push(t); }
+      if(r.out[i]){ ox.push(c[0]);oy.push(c[1]);if(three)oz.push(c[2]);ocd.push([i,sc[i]]); if(hl||only) return; } if(only) return; px.push(c[0]);py.push(c[1]);if(three)pz.push(c[2]);cd.push([i,sc[i]]); if(pidx) pcol.push(pidx.f(i)); });
+    if(showPts && px.length){ const t={type:T,mode:"markers",x:px,y:py,customdata:cd,hovertemplate:ht,marker:{...(pidx?pidx.marker:{}),size:three?(pidx?2.2:1.6):(pidx?4:3),color:pidx?pcol:"#b9b8b2",opacity:pidx?0.85:(three?0.5:0.6),line:{width:0}},showlegend:false}; if(three) t.z=pz; traces.push(t); }
     const nx=[],ny=[],nz=[],ncd=[],sz=[]; for(let k=0;k<K;k++){ nx.push(pos(k,0)); ny.push(pos(k,1)); if(three) nz.push(pos(k,2)); ncd.push([k,np.cnt[k],np.nout[k],np.val[k]]); sz.push(three? nsize(k)*0.55 : nsize(k)); }
     const nt={type:T,mode:"markers",x:nx,y:ny,customdata:ncd,hovertemplate:nht,marker:nodeMarker(sz),showlegend:false}; if(three){ nt.z=nz; nt.marker.line={width:0}; } traces.push(nt);
     if(ox.length){ const t={type:T,mode:"markers",x:ox,y:oy,customdata:ocd,hovertemplate:ht,marker:{size:three?4.5:9,color:"#e34948",symbol:"diamond",line:{color:"#fff",width:0.5}},showlegend:false}; if(three) t.z=oz; traces.push(t); }
