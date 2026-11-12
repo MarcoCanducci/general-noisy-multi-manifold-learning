@@ -61,3 +61,19 @@ def test_export_writes_a_self_contained_page(rng, tmp_path):
     assert inline.stat().st_size > 3_000_000 and "cdn.plot.ly/plotly-" not in inline.read_text()[:2000]
     with pytest.raises(ValueError):
         export_viewer(tmp_path / "x.html", X, H, plotlyjs="nope")
+
+
+def test_extra_labels_are_embedded(rng, tmp_path):
+    X, H = small_hierarchy(rng)
+    z = rng.uniform(size=len(X))
+    cls = np.where(X[:, 1] > 1, "ring", "lines")
+    P = viewer_payload(X, {"a": H}, extra={"redshift": z, "class": cls})
+    num, cat = P["extra"]
+    assert num["kind"] == "num" and np.allclose(np.frombuffer(base64.b64decode(num["values"]), np.float32), z, atol=1e-6)
+    assert cat["kind"] == "cat" and cat["cats"] == ["lines", "ring"]
+    codes = np.frombuffer(base64.b64decode(cat["values"]), np.int32)
+    assert np.array_equal(np.array(cat["cats"])[codes], cls)
+    out = export_viewer(tmp_path / "e.html", X, H, plotlyjs="cdn", extra={"redshift": z})
+    assert '"name":"redshift"' in out.read_text() and 'id="xfile"' in out.read_text()
+    with pytest.raises(ValueError):
+        viewer_payload(X, {"a": H}, extra={"bad": z[:10]})

@@ -168,13 +168,27 @@ Data with more than three features are shown with `axes=(i, j, k)` (feature indi
 
 ### Interactive viewer
 
-`examm.viewer.export_viewer("viewer.html", X, {"run A": H_a, "run B": H_b}, names=...)` writes
-one self-contained HTML page for one or several fitted hierarchies (no server; plotly.js is
-embedded). It shows the points in 3-D with a choice of the three features, the graphs, a tree
-for switching structures, parents or leaves on and off, and an outlier selector on any of the
-per-point scores (log density, orthogonal distance, its Mahalanobis form and tail probability,
-regional rank, background probability), by percentile or by an explicit threshold, over all
-shown points or within each structure. Selections can be downloaded as CSV.
+```python
+from examm.viewer import export_viewer
+export_viewer("viewer.html", X, {"run A": H_a, "run B": H_b}, names=feature_names,
+              extra={"redshift": z, "class": labels})          # extra is optional
+```
+
+writes one self-contained HTML page for one or several fitted hierarchies (no server; plotly.js
+is embedded). To make a viewer for new data, fit the hierarchies on it and call `export_viewer`
+again; `examples/05_viewer_for_your_data.py` does both from the command line.
+
+- **3-D view**: the points with a choice of the three features, the graphs, a tree for switching
+  structures, parents, leaves or residuals on and off, and toggles per dimension.
+- **Graph view**: one structure at a time. Surfaces and higher are shown as the abstract graph
+  laid out in the plane, nodes coloured by points per node, a score, outliers per node or the
+  mean of any feature or label; curves are shown as a profile along their arc length.
+- **Outliers**: on any per-point score (log density, orthogonal distance, its Mahalanobis form
+  and tail probability, regional rank, background probability), by percentile or by an explicit
+  threshold, over all shown points or within each structure. Selections download as CSV.
+- **Extra labels**: per-point values (numbers or categories) for colouring points and nodes,
+  passed as `extra=` or loaded later in the page from a CSV (one line per point in the original
+  order, or with a `row` column holding the point index). A loaded file stays in the browser.
 
 ## GUI
 
