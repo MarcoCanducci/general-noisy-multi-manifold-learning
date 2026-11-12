@@ -132,8 +132,8 @@ _TEMPLATE = r"""<!doctype html>
 body{font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);background:var(--bg);display:flex}
 #side{width:350px;min-width:350px;height:100%;overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:12px 14px}
 #main{flex:1;min-width:0;height:100%;display:flex;flex-direction:column;overflow:hidden}
-#plot{flex:1 1 0;min-height:0;height:0}
-#status{flex:none;padding:6px 12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#plot{flex:1 1 0;min-height:0;height:0;overflow:hidden;position:relative}
+#status{flex:none;height:30px;line-height:18px;background:var(--bg);position:relative;z-index:2;padding:6px 12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 h1{font-size:15px;margin:0 0 8px}h2{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:16px 0 6px}
 label{display:block;margin:6px 0 2px;color:var(--muted);font-size:12px}
 select,input[type=number]{width:100%;padding:4px 6px;border:1px solid var(--line);border-radius:4px;background:#fff;font:inherit}
