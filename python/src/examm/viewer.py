@@ -28,6 +28,19 @@ SCORES = [
     ("rank", "regional rank of the orthogonal distance", False),
     ("bg", "background probability", False),
 ]
+SCORE_HELP = {
+    "logdens": "How likely the whole model (all structures together) makes a point at this position; "
+               "low values mean the point lies where the model expects very few points.",
+    "dist": "How far the point lies from its structure, measured across the structure (perpendicular "
+            "to its local tangent directions), in the units of the data.",
+    "d2": "The same perpendicular offset, measured in units of the noise the model fitted at that "
+          "place, so that thick and thin parts of a structure can be compared.",
+    "pval": "The probability, under the model's local noise, of a perpendicular offset at least this "
+            "large; small values mean the offset is hard to explain as noise.",
+    "rank": "The share of the neighbouring points along the structure (same node or within a few graph "
+            "steps) that lie closer to the structure than this point; 1 means the farthest in its region.",
+    "bg": "The model's probability that the point belongs to the uniform background and not to any structure.",
+}
 
 
 def _b64(a, dtype) -> str:
@@ -380,7 +393,7 @@ def viewer_payload(X, versions: dict, names=None, hops: int = 2, min_region: int
     if not versions:
         raise ValueError("at least one version is required")
     return {"n": n, "d": d, "names": names, "X": _b64(X, np.float32), "extra": _extra_payload(extra, n),
-            "scores": [{"key": k, "label": l, "low": low} for k, l, low in SCORES],
+            "scores": [{"key": k, "label": l, "low": low, "help": SCORE_HELP.get(k, "")} for k, l, low in SCORES],
             "versions": [{"name": str(name), **_version_payload(H, X, hops, min_region)} for name, H in versions.items()]}
 
 
@@ -446,6 +459,9 @@ button:hover{border-color:var(--accent)}
 .tab.active{background:var(--bg);font-weight:600;position:relative;top:1px}
 #dimtog{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 6px}
 #dimtog label{display:flex;align-items:center;gap:4px;margin:0;color:var(--ink)}
+.info{position:relative;display:inline-block;width:15px;height:15px;line-height:15px;text-align:center;border-radius:50%;border:1px solid var(--muted);color:var(--muted);font-size:10px;font-weight:600;cursor:help;margin-left:4px}
+.infobox{display:none;position:absolute;left:-40px;bottom:20px;width:300px;z-index:20;background:#ffffff;color:#0b0b0b;border:1px solid var(--line);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:10px 12px;text-align:left;font-weight:400;font-size:11.5px;line-height:1.45;cursor:default}
+.info:hover .infobox,.info:focus .infobox{display:block}.infobox b{display:block;margin-top:6px}.infobox b:first-child{margin-top:0}
 #catlegend{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:4px;font-size:11px}#catlegend span{display:flex;align-items:center;gap:4px}
 .viewonly{display:none}body.v3d .only3d{display:block}body.vgraph .onlygraph{display:block}
 #tree{border:1px solid var(--line);border-radius:4px;background:#fff;max-height:300px;overflow:auto;padding:4px 0}
@@ -505,7 +521,7 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <p class="hint">Load a CSV with a header line to colour by your own per-point values (numbers or categories): either one line per point in the original order, or with a column named <b>row</b> holding the point index. The file stays in your browser.</p>
   <div id="xinfo" class="hint"></div>
   <h2>Outliers</h2>
-  <label for="score">Score</label><select id="score"></select>
+  <label for="score">Score <span class="info" tabindex="0">i<span class="infobox" id="scorehelp"></span></span></label><select id="score"></select>
   <label class="check"><input type="radio" name="mode" value="pct" checked> by percentile</label>
   <div class="row"><input id="pct" type="range" min="0.05" max="20" step="0.05" value="1"><input id="pctnum" type="number" min="0.01" max="50" step="0.05" value="1" style="max-width:90px"></div>
   <label class="check"><input type="radio" name="mode" value="thr"> by threshold</label>
@@ -937,7 +953,8 @@ $("pctnum").oninput=()=>{ $("pct").value=$("pctnum").value; document.querySelect
 $("thr").oninput=()=>{ $("thrnum").value=(+$("thr").value).toPrecision(4); document.querySelector("input[name=mode][value=thr]").checked=true; draw(); };
 $("thrnum").oninput=()=>{ $("thr").value=$("thrnum").value; document.querySelector("input[name=mode][value=thr]").checked=true; draw(); };
 document.querySelectorAll("input[name=mode]").forEach(e=>e.addEventListener("change",draw));
-DATA.scores.forEach(s=>{ const l=document.createElement("label"); l.className="check"; const c=document.createElement("input"); c.type="checkbox"; c.value=s.key; c.checked=true; l.append(c," "+s.label+" ["+s.key+"]"); $("tabcrit").appendChild(l); });
+DATA.scores.forEach(s=>{ const b=document.createElement("b"); b.textContent=s.label+" ("+(s.low?"low":"high")+" values are outliers)"; $("scorehelp").append(b, document.createTextNode(s.help||"")); });
+DATA.scores.forEach(s=>{ const l=document.createElement("label"); l.className="check"; l.title=s.help||""; const c=document.createElement("input"); c.type="checkbox"; c.value=s.key; c.checked=true; l.append(c," "+s.label+" ["+s.key+"]"); $("tabcrit").appendChild(l); });
 $("tabdl").onclick=downloadTable;
 $("csv").onclick=()=>download(true); $("csvall").onclick=()=>download(false);
 $("lochead").addEventListener("click",()=>{ $("loc").classList.toggle("big"); Plotly.Plots.resize("locplot"); });
