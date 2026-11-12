@@ -390,7 +390,7 @@ class HierarchicalAGTM:
         return f"HierarchicalAGTM(models={n}, background={self.background:g}, residual={self.residual})"
 
 
-def build_hierarchy(X, radii, *, preprocess=None, dims=None, min_region: int = 200, min_nodes=None,
+def build_hierarchy(X, radii, *, preprocess=None, index_preprocess=None, dims=None, min_region: int = 200, min_nodes=None,
                     region_threshold: float = 0.5, sample_weight=None, random_state=None, verbose: bool = False,
                     learner_params: dict | None = None, **hier_params) -> HierarchicalAGTM:
     """Build a hierarchy top-down by scale.
@@ -408,6 +408,9 @@ def build_hierarchy(X, radii, *, preprocess=None, dims=None, min_region: int = 2
         Preprocessing for the detection at each level (see :class:`MultiManifoldLearner`); one spec
         is used for all levels. Detection may thin or filter the data, but every model is trained
         on all the points with the responsibilities as weights.
+    index_preprocess : spec or sequence of specs, optional
+        Separate preprocessing (typically with density thinning) on which the dimensionality index
+        is estimated before being carried to all points; see :class:`MultiManifoldLearner`.
     dims : iterable of int or sequence of those, optional
         Intrinsic dimensions searched at each level.
     hier_params :
@@ -432,6 +435,7 @@ def build_hierarchy(X, radii, *, preprocess=None, dims=None, min_region: int = 2
             if len(region) < min_region:
                 continue
             L = MultiManifoldLearner(r=r, preprocess=per_level(preprocess, k) if preprocess is not None else "saf",
+                                     index_preprocess=per_level(index_preprocess, k),
                                      dims=per_level(dims, k), min_nodes=min_nodes, random_state=rng,
                                      **(learner_params or {}))
             try:

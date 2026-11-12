@@ -21,7 +21,7 @@ STAGES = ("preprocess", "dimension", "graphs", "agtm")
 # which stage each parameter first affects
 _PARAM_STAGE = {
     "r": 0, "preprocess": 0,
-    "smooth_factor": 1, "dim_min_points": 1,
+    "smooth_factor": 1, "dim_min_points": 1, "index_preprocess": 1,
     "dims": 2, "graph": 2, "eta": 2, "beta": 2, "min_points": 2, "min_nodes": 2, "min_residual": 2,
     "angle_threshold": 2, "attach": 2,
     "epsilon": 3, "agtm_params": 3, "background": 3,
@@ -79,6 +79,12 @@ class MultiManifoldLearner:
         Spacing in hops of the AGTM basis-function centres.
     smooth_factor : float
         Spatial smoothing radius of the dimensionality index in units of ``r``.
+    index_preprocess : preprocessing step, pipeline or name, optional
+        If given, the dimensionality index is estimated on the points this preprocessing leaves
+        (typically ``Pipeline([DensityThin(...), SAF(), DensityFilter()])``) and carried to every
+        modelled point from its nearest neighbour among them. Use it when the density varies so
+        much that the smoothed index of the dense core spreads over everything else, while all
+        points should still be used to build the graphs. Details are kept in ``index_source_``.
     attach : {"same_dim", "all"}
         Noisy points used to train each AGTM: those within ``r`` of the graph nodes whose
         dimensionality index equals the manifold's dimension, or all of them.
@@ -105,7 +111,7 @@ class MultiManifoldLearner:
 
     def __init__(self, r: float, *, preprocess="saf", dims=None, graph: str = "crawl", eta: float = 0.75,
                  beta: float = 0.4, epsilon: int = 1, smooth_factor: float = 1.0,
-                 dim_min_points: int | None = None, min_points: int = 5, min_nodes: int | None = None,
+                 dim_min_points: int | None = None, index_preprocess=None, min_points: int = 5, min_nodes: int | None = None,
                  min_residual: int = 20, angle_threshold: float = 2.0 / 3.0, attach: str = "same_dim",
                  background: float = 0.0, agtm_params: dict | None = None, random_state=None,
                  n_jobs: int | None = None, verbose: bool = False):
@@ -118,6 +124,7 @@ class MultiManifoldLearner:
         self.epsilon = epsilon
         self.smooth_factor = smooth_factor
         self.dim_min_points = dim_min_points
+        self.index_preprocess = index_preprocess
         self.min_points = min_points
         self.min_nodes = min_nodes
         self.min_residual = min_residual
@@ -176,9 +183,26 @@ class MultiManifoldLearner:
         if self._done < 1:
             self.run_preprocess()
         t = time.perf_counter()
-        self.dim_result_ = dimensionality_index(self.preprocess_.diffused, float(self.r),
-                                                smooth_factor=self.smooth_factor,
-                                                min_points=self.dim_min_points)
+        if self.index_preprocess is None:
+            self.dim_result_ = dimensionality_index(self.preprocess_.diffused, float(self.r),
+                                                    smooth_factor=self.smooth_factor,
+                                                    min_points=self.dim_min_points)
+        else:
+            # estimate the index on a separately preprocessed (typically density-thinned) subset,
+            # where dense regions cannot outvote the rest, and carry it to every modelled point
+            # from its nearest neighbour in that subset (original coordinates)
+            from dataclasses import fields
+            from scipy.spatial import cKDTree
+
+            sub = resolve(self.index_preprocess).apply(PreprocessResult.initial(self.X_), float(self.r))
+            if len(sub) == 0:
+                raise ValueError("index_preprocess removed every point")
+            res = dimensionality_index(sub.diffused, float(self.r), smooth_factor=self.smooth_factor,
+                                       min_points=self.dim_min_points)
+            _, nn = cKDTree(sub.noisy).query(self.preprocess_.noisy)
+            self.dim_result_ = type(res)(**{f.name: (None if getattr(res, f.name) is None else getattr(res, f.name)[nn])
+                                            for f in fields(res)})
+            self.index_source_ = {"preprocess": sub, "result": res, "nearest": nn}
         self.dim_index_ = np.zeros(len(self.X_), dtype=int)
         self.dim_index_[self.preprocess_.indices] = self.dim_result_.index
         self.timings_["dimension"] = time.perf_counter() - t

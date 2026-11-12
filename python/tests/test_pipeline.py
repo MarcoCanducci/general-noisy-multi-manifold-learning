@@ -128,3 +128,19 @@ def test_d1_recovers_manifolds_of_mixed_dimension():
     for k in (3, 4, 5, 6):
         assert sum(m.dim == 2 for m in owners[k]) == 1
     assert sum(m.dim == 1 for m in owners[1]) == 1 and 1 <= len(owners[2]) <= 4
+
+
+def test_index_can_be_estimated_on_a_thinned_subset():
+    import examm
+
+    rng = np.random.default_rng(3)
+    X = np.c_[rng.uniform(0, 3, (3000, 2)), rng.normal(0, 0.01, 3000)]
+    thin = examm.Pipeline([examm.DensityThin(radius=0.2, target=15, random_state=0), examm.SAF(), examm.DensityFilter()])
+    L = examm.MultiManifoldLearner(r=0.3, dims=[1, 2], index_preprocess=thin, random_state=0).set_data(X).run("graphs")
+    src = L.index_source_
+    assert len(src["preprocess"]) < len(L.preprocess_) == len(L.dim_result_.index)
+    assert np.array_equal(L.dim_result_.index, src["result"].index[src["nearest"]])
+    # a point of the subset keeps its own estimate
+    pos = {int(i): k for k, i in enumerate(L.preprocess_.indices)}
+    k = next(q for q, i in enumerate(src["preprocess"].indices) if int(i) in pos)
+    assert L.dim_result_.index[pos[int(src["preprocess"].indices[k])]] == src["result"].index[k]
