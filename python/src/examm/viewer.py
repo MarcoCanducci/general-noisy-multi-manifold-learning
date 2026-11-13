@@ -301,7 +301,7 @@ def _topology(X, items, max_landmarks: int = 500) -> dict:
     from scipy.spatial import cKDTree
 
     n = len(X)
-    out = {"islands": [], "links": [], "pj": "", "pi": "", "pisl": ""}
+    out = {"islands": [], "links": [], "pj": "", "pi": "", "pf": "", "pisl": ""}
     if not items:
         return out
     off = np.cumsum([0] + [len(it["means"]) for it in items])
@@ -310,13 +310,15 @@ def _topology(X, items, max_landmarks: int = 500) -> dict:
     jn, jp = _cloud_embedding(P, E, X, 3, max_landmarks=max_landmarks)
     pj, pi = np.zeros((n, 3), dtype=np.float32), np.zeros((n, 3), dtype=np.float32)
     pisl = np.full(n, -1, dtype=np.int16)
-    el = []
+    pf = np.zeros((n, 3), dtype=np.float32)
+    el, placed = [], []
     for k, it in enumerate(items):
         rows = it["rows"]
         target = np.vstack([jn[off[k]:off[k + 1]], jp[rows]])
         c = target.mean(0)
         own = _rigid_fit(np.vstack([it["own_nodes"], it["own_points"]]), target)
         K = len(it["means"])
+        placed.append(own)
         pj[rows], pi[rows], pisl[rows] = target[K:] - c, own[K:] - c, k
         out["islands"].append({"g": int(it["g"]), "c": [float(c[0]), float(c[1]), float(c[2])],
                                "nj": _b64(target[:K] - c, np.float32), "ni": _b64(own[:K] - c, np.float32)})
@@ -325,6 +327,7 @@ def _topology(X, items, max_landmarks: int = 500) -> dict:
     el = np.array(el)
     el[el <= 0] = np.median(el[el > 0]) if (el > 0).any() else 1.0
     trees = [cKDTree(it["means"]) for it in items]
+    seams = [[] for _ in items]                 # per graph: (own node ids, other graph, its node ids)
     for a in range(len(items)):
         for b in range(a + 1, len(items)):
             d, j = trees[b].query(items[a]["means"])
@@ -332,8 +335,65 @@ def _topology(X, items, max_landmarks: int = 500) -> dict:
             if ok.any():
                 out["links"].append({"a": a, "b": b, "n": int(ok.sum()), "ia": _b64(np.flatnonzero(ok), np.int32),
                                      "ib": _b64(np.unique(j[ok]), np.int32)})
-    out.update(pj=_b64(pj, np.float32), pi=_b64(pi, np.float32), pisl=_b64(pisl, np.int16))
+                d2, i2 = trees[a].query(items[b]["means"])
+                ok2 = d2 < 1.5 * max(el[a], el[b])
+                ia = np.r_[np.flatnonzero(ok), i2[ok2]]
+                ib = np.r_[j[ok], np.flatnonzero(ok2)]
+                seams[a].append((ia, b, ib))
+                seams[b].append((ib, a, ia))
+    # "flattened and joined": every graph keeps its own flat unfolding and is moved as a rigid
+    # piece so that the nodes it shares a contact with meet those of its neighbours
+    flat = _join_pieces([pl[:len(it["means"])] for pl, it in zip(placed, items)],
+                        [jn[off[k]:off[k + 1]] for k in range(len(items))], seams)
+    for k, it in enumerate(items):
+        K = len(it["means"])
+        moved = (placed[k] - flat[k]["cs"]) @ flat[k]["R"] + flat[k]["cd"]
+        c = moved.mean(0)
+        pf[it["rows"]] = moved[K:] - c
+        out["islands"][k].update(cf=[float(c[0]), float(c[1]), float(c[2])], nf=_b64(moved[:K] - c, np.float32))
+    out["seam_gap"] = {"islands": _seam_gap([pl[:len(it["means"])] for pl, it in zip(placed, items)], seams, el),
+                       "joint": _seam_gap([jn[off[k]:off[k + 1]] for k in range(len(items))], seams, el),
+                       "flat": _seam_gap([(placed[k][:len(it["means"])] - flat[k]["cs"]) @ flat[k]["R"] + flat[k]["cd"]
+                                          for k, it in enumerate(items)], seams, el)}
+    out.update(pj=_b64(pj, np.float32), pi=_b64(pi, np.float32), pf=_b64(pf, np.float32), pisl=_b64(pisl, np.int16))
     return out
+
+
+def _seam_gap(nodes, seams, el) -> float:
+    """Mean distance between nodes in contact, in units of the local edge length."""
+    g = [np.linalg.norm(nodes[a][ia] - nodes[b][ib], axis=1) / max(el[a], el[b])
+         for a, lst in enumerate(seams) for ia, b, ib in lst if a < b]
+    return float(np.concatenate(g).mean()) if g else 0.0
+
+
+def _join_pieces(nodes, anchors, seams, anchor_weight: float = 0.05, sweeps: int = 80) -> list:
+    """Rigid motions that make flat pieces meet along their contacts.
+
+    ``nodes[k]`` are the node positions of piece ``k`` (already placed roughly), ``anchors[k]``
+    where the joint unfolding puts them, ``seams[k]`` its contacts ``(own ids, other piece, its
+    ids)``. Each piece in turn is moved (rotation and shift, no deformation) to bring its contact
+    nodes onto those of its neighbours, with a weak pull towards its anchors that keeps the
+    overall arrangement and settles pieces without contacts. Returns per piece ``R``, ``cs``,
+    ``cd`` with ``moved = (x - cs) @ R + cd``.
+    """
+    cur = [a.copy() for a in nodes]
+    T = [{"R": np.eye(3), "cs": np.zeros(3), "cd": np.zeros(3)} for _ in nodes]
+    for _ in range(sweeps):
+        shift = 0.0
+        for k, base in enumerate(nodes):
+            src = [base] + [base[ia] for ia, _, _ in seams[k]]
+            dst = [anchors[k]] + [cur[b][ib] for _, b, ib in seams[k]]
+            w = np.concatenate([np.full(len(base), anchor_weight)] + [np.ones(len(ia)) for ia, _, _ in seams[k]])
+            A, B = np.vstack(src), np.vstack(dst)
+            cs, cd = (w[:, None] * A).sum(0) / w.sum(), (w[:, None] * B).sum(0) / w.sum()
+            U, _, Vt = np.linalg.svd((A - cs).T @ (w[:, None] * (B - cd)))
+            R = U @ Vt
+            new = (base - cs) @ R + cd
+            shift = max(shift, float(np.abs(new - cur[k]).max()))
+            cur[k], T[k] = new, {"R": R, "cs": cs, "cd": cd}
+        if shift < 1e-5:
+            break
+    return T
 
 
 def _version_payload(H, X, hops: int, min_region: int) -> dict:
@@ -554,15 +614,16 @@ pre{font-size:10.5px;white-space:pre;overflow:auto;max-height:240px;background:#
   <label class="check"><input type="checkbox" id="showgraphs" checked> graphs of the selected structures</label>
   <div class="viewonly onlytopo">
   <h2>Topology</h2>
-  <label for="tmode">Layout</label><select id="tmode"><option value="isl">islands: each structure in its own unfolding</option><option value="joint">joint: everything unfolded together</option></select>
+  <label for="tmode">Layout</label><select id="tmode"><option value="isl">islands: each structure in its own unfolding</option><option value="flat">flattened and joined: flat pieces meeting at their contacts</option><option value="joint">joint: everything unfolded together</option></select>
   <label for="tsep">Pull the structures apart</label><input id="tsep" type="range" min="0" max="1" step="0.01" value="1">
   <label for="tlink">Hide links with fewer contacts than <span id="tlinkv">1</span></label><input id="tlink" type="range" min="1" max="50" step="1" value="1">
   <label for="tnode">Colour nodes by</label><select id="tnode"></select>
   <label class="check"><input type="checkbox" id="tpts" checked> data points</label>
   <label class="check"><input type="checkbox" id="tlinks" checked> links between structures in contact</label>
   <label class="check"><input type="checkbox" id="tlabels" checked> labels and outlines</label>
+  <label class="check"><input type="checkbox" id="tpersp" checked> perspective (near things larger)</label>
   <div class="row tight" style="margin-top:6px"><button id="treset">Reset arrangement</button><button id="tfit">Fit to window</button><button id="tpng">Save picture</button></div>
-  <p class="hint">The picture is three-dimensional. Drag the background to rotate the whole frame: the structures keep the arrangement you gave them and turn together. Drag a structure to move it (in the plane of the screen), Shift-drag to turn it on itself, press F over it to mirror it. Right-drag (or Ctrl-drag) to pan, use the wheel to zoom, double-click a structure to open its graph page. Both layouts are unfolded through the original data points: "islands" draws every structure in its own unfolding as on the graph page (curves and surfaces stay flat sheets), placed and oriented as in the joint unfolding; "joint" unfolds all structures and all points together in 3-D, so structures that run through each other overlap. A link joins two structures that have nodes within 1.5 edge lengths of each other; its width is the number of such nodes. Your arrangement is remembered in this browser.</p>
+  <p class="hint">The picture is three-dimensional. Drag the background to rotate the whole frame: the structures keep the arrangement you gave them and turn together. Drag a structure to move it (in the plane of the screen), Shift-drag to turn it on itself, press F over it to mirror it. Right-drag (or Ctrl-drag) to pan, use the wheel to zoom, double-click a structure to open its graph page. Both layouts are unfolded through the original data points: "islands" draws every structure in its own unfolding as on the graph page (curves and surfaces stay flat sheets), placed and oriented as in the joint unfolding; "flattened and joined" keeps every structure flat in the same way but moves each one, as a rigid piece, so that the nodes it has in contact with its neighbours meet (nothing is bent or stretched); "joint" unfolds all structures and all points together in 3-D, so structures that run through each other overlap and bend. A link joins two structures that have nodes within 1.5 edge lengths of each other; its width is the number of such nodes. Your arrangement is remembered in this browser.</p>
   </div>
   <div class="viewonly onlygraph">
   <h2>Graph view</h2>
@@ -634,8 +695,8 @@ const N=DATA.n, D=DATA.d, X=dec(DATA.X, Float32Array);
 const V = DATA.versions.map(v => ({name:v.name, summary:v.summary, sid:dec(v.sid,Int16Array), node:dec(v.node,Int32Array),
   toward:dec(v.toward,Int32Array), frac:dec(v.frac,Float32Array), ppos: v.ppos ? dec(v.ppos,Float32Array) : null, ppos2: v.ppos2 ? dec(v.ppos2,Float32Array) : null,
   status: v.status ? dec(v.status,Int8Array) : null, status_names: v.status_names||[], discarded: v.discarded||"",
-  topo: v.topo && v.topo.islands && v.topo.islands.length ? {pj:dec(v.topo.pj,Float32Array), pi:dec(v.topo.pi,Float32Array), pisl:dec(v.topo.pisl,Int16Array),
-    isl:v.topo.islands.map(t=>({g:t.g, c:t.c, nj:dec(t.nj,Float32Array), ni:dec(t.ni,Float32Array), d:[0,0,0], R:[1,0,0,0,1,0,0,0,1]})),
+  topo: v.topo && v.topo.islands && v.topo.islands.length ? {pj:dec(v.topo.pj,Float32Array), pi:dec(v.topo.pi,Float32Array), pf: v.topo.pf ? dec(v.topo.pf,Float32Array) : null, gap:v.topo.seam_gap||null, pisl:dec(v.topo.pisl,Int16Array),
+    isl:v.topo.islands.map(t=>({g:t.g, c:t.c, nj:dec(t.nj,Float32Array), ni:dec(t.ni,Float32Array), nf: t.nf ? dec(t.nf,Float32Array) : null, cf:t.cf||t.c, d:[0,0,0], R:[1,0,0,0,1,0,0,0,1]})),
     links:v.topo.links.map(l=>({a:l.a,b:l.b,n:l.n,ia:dec(l.ia,Int32Array),ib:dec(l.ib,Int32Array)}))} : null,
   idxh: v.idxh ? dec(v.idxh,Int8Array) : null, idxs: v.idxs ? dec(v.idxs,Int8Array) : null,
   scores:Object.fromEntries(Object.entries(v.scores).map(([k,b])=>[k,dec(b,Float32Array)])),
@@ -923,11 +984,11 @@ function topoLoad(){ const T=V[cur].topo; if(!T) return; let a=null; try{ a=JSON
 function topoGeometry(){
   // radii, separated centres and link anchors of the current version and layout (cached)
   const v=V[cur], T=v.topo, mode=$("tmode").value, key=cur+"|"+mode; if(T.geo && T.geo.key===key) return T.geo;
-  const K=T.isl.length, R=new Array(K), loc=T.isl.map(t=> mode==="joint" ? t.nj : t.ni), pl = mode==="joint" ? T.pj : T.pi;
+  const K=T.isl.length, R=new Array(K), flat = mode==="flat" && T.pf && T.isl.every(t=>t.nf), loc=T.isl.map(t=> mode==="joint" ? t.nj : flat ? t.nf : t.ni), pl = mode==="joint" ? T.pj : flat ? T.pf : T.pi, cen=T.isl.map(t=> flat ? t.cf : t.c);
   const far=T.isl.map(()=>[]); for(let k=0;k<K;k++){ const L=loc[k]; for(let i=0;i<L.length/3;i++) far[k].push(Math.hypot(L[3*i],L[3*i+1],L[3*i+2])); }
   const step=Math.max(1,Math.floor(N/6000)); for(let i=0;i<N;i+=step){ const k=T.pisl[i]; if(k>=0) far[k].push(Math.hypot(pl[3*i],pl[3*i+1],pl[3*i+2])); }
   for(let k=0;k<K;k++) R[k]=quantile(far[k],0.97)||0.1;
-  const medR=median(R), Rm=R.map(x=>Math.max(x,0.3*medR)), gap=0.12*medR, C=T.isl.map(t=>t.c.slice()), C0=C.map(c=>c.slice());
+  const medR=median(R), Rm=R.map(x=>Math.max(x,0.3*medR)), gap=0.12*medR, C=cen.map(c=>c.slice()), C0=C.map(c=>c.slice());
   for(let it=0;it<600;it++){ let moved=false;
     for(let a=0;a<K;a++) for(let b=a+1;b<K;b++){ let d=[C[b][0]-C[a][0],C[b][1]-C[a][1],C[b][2]-C[a][2]], L=Math.hypot(d[0],d[1],d[2]); if(L<1e-9){ d=[1e-3*(b+1),1e-3,1e-3*a]; L=Math.hypot(d[0],d[1],d[2]); }
       const need=Rm[a]+Rm[b]+gap; if(L<need){ const sh=(need-L)/L, wa=Rm[b]/(Rm[a]+Rm[b]); for(let q=0;q<3;q++){ C[a][q]-=d[q]*sh*wa; C[b][q]+=d[q]*sh*(1-wa); } moved=true; } }
@@ -935,17 +996,23 @@ function topoGeometry(){
   const anchor=(L,ids)=>{ const m=[0,0,0]; ids.forEach(i=>{ m[0]+=L[3*i]; m[1]+=L[3*i+1]; m[2]+=L[3*i+2]; }); return m.map(x=>x/ids.length); };
   const links=T.links.map(l=>({a:l.a,b:l.b,n:l.n,pa:anchor(loc[l.a],l.ia),pb:anchor(loc[l.b],l.ib)}));
   const rows=T.isl.map(()=>[]); for(let i=0;i<N;i++){ const k=T.pisl[i]; if(k>=0) rows[k].push(i); }
-  T.geo={key,R:Rm,sep:C,loc,pl,links,rows,maxn:Math.max(1,...links.map(l=>l.n))}; return T.geo;
+  T.geo={key,R:Rm,sep:C,cen,loc,pl,links,rows,maxn:Math.max(1,...links.map(l=>l.n))}; return T.geo;
 }
-function topoCentre(k,G){ const t=V[cur].topo.isl[k], f=+$("tsep").value; return [0,1,2].map(q=>t.c[q]+f*(G.sep[k][q]-t.c[q])+t.d[q]); }
+function topoCentre(k,G){ const t=V[cur].topo.isl[k], c=G.cen[k], f=+$("tsep").value; return [0,1,2].map(q=>c[q]+f*(G.sep[k][q]-c[q])+t.d[q]); }
+function topoPersp(G){ // perspective about the middle of the window: size factor for a depth z in view coordinates
+  const cv=$("topo"); if(!$("tpersp").checked) return {on:false,f:()=>1,cx:0,cy:0};
+  let z0=0,n=0,ext=0; const cs=[]; V[cur].topo.isl.forEach((t,k)=>{ if(!topoVisible(k)) return; const c=mv(TV.R,topoCentre(k,G)); cs.push([c[2],G.R[k]]); z0+=c[2]; n++; });
+  z0 = n ? z0/n : 0; cs.forEach(c=>{ ext=Math.max(ext,Math.abs(c[0]-z0)+c[1]); });
+  const dist=2.2*Math.max(ext,1e-9); return {on:true, cx:cv.clientWidth/2, cy:cv.clientHeight/2, f:z=>dist/Math.max(dist-(z-z0),0.15*dist)}; }
+function topoScreen(c,P){ const f=P.f(c[2]), x=TV.tx+TV.scale*c[0], y=TV.ty-TV.scale*c[1]; return P.on ? [P.cx+(x-P.cx)*f, P.cy+(y-P.cy)*f, f] : [x,y,1]; }
 function topoVisible(k){ const v=V[cur], g=v.topo.isl[k].g; return v.S.some(s=>s.on && s.kind!=="group" && s.graph_of===g); }
 function topoFit(){ const cv=$("topo"), v=V[cur]; if(!v.topo) return; const G=topoGeometry();
   let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity; v.topo.isl.forEach((t,k)=>{ if(!topoVisible(k)) return; const p=mv(TV.R,topoCentre(k,G)), r=G.R[k]*1.15;
     x0=Math.min(x0,p[0]-r); x1=Math.max(x1,p[0]+r); y0=Math.min(y0,p[1]-r); y1=Math.max(y1,p[1]+r); });
   if(!Number.isFinite(x0)) return; const w=cv.clientWidth, h=cv.clientHeight; TV.scale=0.94*Math.min(w/(x1-x0), h/(y1-y0)); TV.tx=w/2-TV.scale*(x0+x1)/2; TV.ty=h/2+TV.scale*(y0+y1)/2; }
-function topoHit(mx,my){ const v=V[cur]; if(!v.topo) return -1; const G=topoGeometry(); let best=-1, bz=-Infinity;
-  v.topo.isl.forEach((t,k)=>{ if(!topoVisible(k)) return; const p=mv(TV.R,topoCentre(k,G)), sx=TV.tx+TV.scale*p[0], sy=TV.ty-TV.scale*p[1];
-    if(Math.hypot(mx-sx,my-sy)<=G.R[k]*1.05*TV.scale && (best<0 || G.R[k]<G.R[best]*0.999 || (Math.abs(G.R[k]-G.R[best])<1e-9 && p[2]>bz))){ best=k; bz=p[2]; } }); return best; }
+function topoHit(mx,my){ const v=V[cur]; if(!v.topo) return -1; const G=topoGeometry(), P=topoPersp(G); let best=-1, bz=-Infinity;
+  v.topo.isl.forEach((t,k)=>{ if(!topoVisible(k)) return; const p=mv(TV.R,topoCentre(k,G)), q=topoScreen(p,P), sx=q[0], sy=q[1];
+    if(Math.hypot(mx-sx,my-sy)<=G.R[k]*1.05*TV.scale*q[2] && (best<0 || G.R[k]<G.R[best]*0.999 || (Math.abs(G.R[k]-G.R[best])<1e-9 && p[2]>bz))){ best=k; bz=p[2]; } }); return best; }
 function topoColours(r){
   // colour index of every point and the palette, following "Colour points by"
   const v=V[cur], cm=$("colour").value, e=extraOf(cm), ci=new Uint16Array(N), pal=[], idOf=new Map(); let bar=null;
@@ -972,31 +1039,35 @@ function drawTopo(recompute){
     $("outinfo").innerHTML = `<b>${r.nout.toLocaleString()}</b> outliers among ${r.nshown.toLocaleString()} shown points (${r.nshown? (100*r.nout/r.nshown).toFixed(2):"0"} %)<br><span class="kind">${meta.low?"low":"high"} values are outliers · ${r.info||""}</span>`; }
   const {r,col,nodes,nbar,prow}=topoCache, S_=TV.scale, K=T.isl.length;
   // affine map local -> screen for every island: screen = (A local + c) scaled; A = view rotation x island rotation
-  const M=new Array(K), vis=new Array(K), ctr=new Array(K);
-  for(let k=0;k<K;k++){ vis[k]=topoVisible(k); const A=mm(TV.R,T.isl[k].R), c=mv(TV.R,topoCentre(k,G)); ctr[k]=c;
-    M[k]=[S_*A[0],S_*A[1],S_*A[2],TV.tx+S_*c[0], -S_*A[3],-S_*A[4],-S_*A[5],TV.ty-S_*c[1]]; }
-  const sx=(m,L,i)=>m[0]*L[3*i]+m[1]*L[3*i+1]+m[2]*L[3*i+2]+m[3], sy=(m,L,i)=>m[4]*L[3*i]+m[5]*L[3*i+1]+m[6]*L[3*i+2]+m[7];
-  const pt=(k,q)=>[M[k][0]*q[0]+M[k][1]*q[1]+M[k][2]*q[2]+M[k][3], M[k][4]*q[0]+M[k][5]*q[1]+M[k][6]*q[2]+M[k][7]];
+  const M=new Array(K), vis=new Array(K), ctr=new Array(K), PS=topoPersp(G), cs_=new Array(K);
+  for(let k=0;k<K;k++){ vis[k]=topoVisible(k); const A=mm(TV.R,T.isl[k].R), c=mv(TV.R,topoCentre(k,G)); ctr[k]=c; cs_[k]=topoScreen(c,PS);
+    M[k]=[S_*A[0],S_*A[1],S_*A[2],TV.tx+S_*c[0], -S_*A[3],-S_*A[4],-S_*A[5],TV.ty-S_*c[1], A[6],A[7],A[8],c[2]]; }
+  // screen x of a local point; PY then holds its screen y and PF its perspective size factor
+  let PF=1, PY=0;
+  const sx=(m,L,i)=>{ const x=m[0]*L[3*i]+m[1]*L[3*i+1]+m[2]*L[3*i+2]+m[3], y=m[4]*L[3*i]+m[5]*L[3*i+1]+m[6]*L[3*i+2]+m[7]; if(!PS.on){ PF=1; PY=y; return x; }
+    PF=PS.f(m[8]*L[3*i]+m[9]*L[3*i+1]+m[10]*L[3*i+2]+m[11]); PY=PS.cy+(y-PS.cy)*PF; return PS.cx+(x-PS.cx)*PF; };
+  const sy=()=>PY;                                                   // always called right after sx for the same point
+  const pt=(k,q)=>{ const x=sx(M[k],q,0); return [x,PY]; };
   const showL=$("tlabels").checked, hov=topoHover, showP=$("tpts").checked, only=$("only").checked, hl=$("hl").checked;
   const order=[...Array(K).keys()].filter(k=>vis[k]).sort((a,b)=>ctr[a][2]-ctr[b][2]);       // far structures first
   const psz=Math.max(1.2,Math.min(3,+$("psize").value*0.8)), pop=Math.min(1,+$("popac").value+0.1), pl=G.pl;
-  order.forEach(k=>{ const g=v.S[T.isl[k].g], m=M[k], L=G.loc[k], c0=[m[3],m[7]];
-    if(showL){ ctx.beginPath(); ctx.arc(c0[0],c0[1],G.R[k]*1.05*S_,0,2*Math.PI); ctx.globalAlpha = k===hov ? 0.12 : 0.04; ctx.fillStyle=g.colour; ctx.fill();
+  order.forEach(k=>{ const g=v.S[T.isl[k].g], m=M[k], L=G.loc[k], c0=cs_[k], kf=c0[2];
+    if(showL){ ctx.beginPath(); ctx.arc(c0[0],c0[1],G.R[k]*1.05*S_*kf,0,2*Math.PI); ctx.globalAlpha = k===hov ? 0.12 : 0.04; ctx.fillStyle=g.colour; ctx.fill();
       ctx.globalAlpha = k===hov ? 0.9 : 0.3; ctx.strokeStyle=g.colour; ctx.lineWidth = k===hov ? 1.6 : 0.8; ctx.stroke(); }
     if(showP && !only){ ctx.globalAlpha=pop; let last=-1; const rows=prow[k]; for(let q=0;q<rows.length;q++){ const i=rows[q]; if(!r.shown[i]||(hl&&r.out[i])) continue;
-        if(col.ci[i]!==last){ last=col.ci[i]; ctx.fillStyle=col.pal[last]; } ctx.fillRect(sx(m,pl,i)-psz/2, sy(m,pl,i)-psz/2, psz, psz); } }
+        if(col.ci[i]!==last){ last=col.ci[i]; ctx.fillStyle=col.pal[last]; } const x=sx(m,pl,i), z=psz*PF; ctx.fillRect(x-z/2, PY-z/2, z, z); } }
     const E=g.edges; ctx.strokeStyle=g.colour; ctx.globalAlpha=0.75; ctx.lineWidth=0.8; ctx.beginPath();
     for(let e=0;e<E.length/2;e++){ const a=E[2*e], b=E[2*e+1]; ctx.moveTo(sx(m,L,a),sy(m,L,a)); ctx.lineTo(sx(m,L,b),sy(m,L,b)); }
     ctx.stroke(); ctx.globalAlpha=1; const nr=Math.max(1.6,Math.min(4.5,0.022*G.R[k]*S_+1.4));
-    for(let i=0;i<g.n_nodes;i++){ ctx.beginPath(); ctx.arc(sx(m,L,i),sy(m,L,i),nr,0,2*Math.PI);
+    for(let i=0;i<g.n_nodes;i++){ ctx.beginPath(); const x=sx(m,L,i); ctx.arc(x,PY,nr*PF,0,2*Math.PI);
       ctx.fillStyle = nodes ? (nodes[k][i]<0 ? "#e4e3dd" : RAMP[nodes[k][i]]) : g.colour; ctx.fill(); if(nodes){ ctx.strokeStyle="#ffffff"; ctx.lineWidth=0.5; ctx.stroke(); } }
     if(showP && (hl||only)){ ctx.fillStyle="#e34948"; ctx.strokeStyle="#ffffff"; ctx.lineWidth=0.5; const rows=G.rows[k];
-      for(let q=0;q<rows.length;q++){ const i=rows[q]; if(!r.out[i]) continue; const x=sx(m,pl,i), y=sy(m,pl,i); ctx.beginPath(); ctx.moveTo(x,y-4); ctx.lineTo(x+4,y); ctx.lineTo(x,y+4); ctx.lineTo(x-4,y); ctx.closePath(); ctx.fill(); ctx.stroke(); } }
+      for(let q=0;q<rows.length;q++){ const i=rows[q]; if(!r.out[i]) continue; const x=sx(m,pl,i), y=PY, q4=4*PF; ctx.beginPath(); ctx.moveTo(x,y-q4); ctx.lineTo(x+q4,y); ctx.lineTo(x,y+q4); ctx.lineTo(x-q4,y); ctx.closePath(); ctx.fill(); ctx.stroke(); } }
   });
   if($("tlinks").checked){ const minn=+$("tlink").value; ctx.lineCap="round"; G.links.forEach(l=>{ if(l.n<minn||!vis[l.a]||!vis[l.b]) return; const A=pt(l.a,l.pa), B=pt(l.b,l.pb), mine = hov===l.a||hov===l.b;
       ctx.globalAlpha = hov<0 ? 0.4 : (mine ? 0.75 : 0.08); ctx.strokeStyle = mine ? "#0b0b0b" : "#52514e"; ctx.lineWidth=0.8+9*l.n/G.maxn; ctx.beginPath(); ctx.moveTo(A[0],A[1]); ctx.lineTo(B[0],B[1]); ctx.stroke(); }); ctx.globalAlpha=1; }
   if(showL){ ctx.font="12px system-ui,sans-serif"; ctx.textAlign="center"; ctx.textBaseline="bottom"; order.forEach(k=>{ const g=v.S[T.isl[k].g], t=g.label+(g.kind==="group"?" (rest)":"")+" · "+g.dim+"-D";
-      const y=M[k][7]-G.R[k]*1.05*S_-3, x=M[k][3], tw=ctx.measureText(t).width; ctx.fillStyle="rgba(255,255,255,0.8)"; ctx.fillRect(x-tw/2-3,y-14,tw+6,15); ctx.fillStyle="#0b0b0b"; ctx.fillText(t,x,y); }); }
+      const y=cs_[k][1]-G.R[k]*1.05*S_*cs_[k][2]-3, x=cs_[k][0], tw=ctx.measureText(t).width; ctx.fillStyle="rgba(255,255,255,0.8)"; ctx.fillRect(x-tw/2-3,y-14,tw+6,15); ctx.fillStyle="#0b0b0b"; ctx.fillText(t,x,y); }); }
   // orientation of the frame
   { const o=[44,h-44], len=26, cols=["#e34948","#1baf7a","#2a78d6"]; ctx.font="10px system-ui,sans-serif"; ctx.textAlign="center"; ctx.textBaseline="middle";
     [0,1,2].map(q=>({q,z:TV.R[6+q]})).sort((a,b)=>a.z-b.z).forEach(({q})=>{ const ex=TV.R[q], ey=TV.R[3+q]; ctx.strokeStyle=cols[q]; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(o[0],o[1]); ctx.lineTo(o[0]+len*ex,o[1]-len*ey); ctx.stroke();
@@ -1005,13 +1076,13 @@ function drawTopo(recompute){
     ctx.fillStyle="rgba(255,255,255,0.85)"; ctx.fillRect(w-26-tw,by-4,tw+16,46); ctx.fillStyle="#52514e"; ctx.fillText(b.title,w-18-tw,by); RAMP.forEach((c,i)=>{ ctx.fillStyle=c; ctx.fillRect(x0+i*bw,by+15,bw,9); });
     ctx.fillStyle="#52514e"; ctx.fillText(b.lo.toPrecision(3),x0,by+26); ctx.textAlign="right"; ctx.fillText(b.hi.toPrecision(3),x0+7*bw,by+26); by+=52; });
   const nv=order.length, nl=G.links.filter(l=>l.n>=+$("tlink").value&&vis[l.a]&&vis[l.b]).length;
-  $("status").textContent = v.name+" · "+nv+" structures, "+nl+" links"+(hov>=0 ? " · structure "+v.S[T.isl[hov].g].label+": "+v.S[T.isl[hov].g].dim+"-D, "+v.S[T.isl[hov].g].n_nodes+" nodes, "+G.rows[hov].length.toLocaleString()+" points · drag to move, Shift-drag to turn" : " · drag the background to rotate the frame, drag a structure to move it");
+  $("status").textContent = v.name+" · "+nv+" structures, "+nl+" links"+(hov>=0 ? " · structure "+v.S[T.isl[hov].g].label+": "+v.S[T.isl[hov].g].dim+"-D, "+v.S[T.isl[hov].g].n_nodes+" nodes, "+G.rows[hov].length.toLocaleString()+" points · drag to move, Shift-drag to turn" : (G.key.endsWith("flat") && T.gap ? " · mean gap between nodes in contact: "+T.gap.flat.toFixed(2)+" edge lengths (islands at joint positions "+T.gap.islands.toFixed(2)+", joint "+T.gap.joint.toFixed(2)+")" : " · drag the background to rotate the frame, drag a structure to move it"));
 }
 function topoRedraw(){ if(topoRAF) return; topoRAF=requestAnimationFrame(()=>{ topoRAF=0; if(view==="topo") drawTopo(false); }); }
 (function(){ const cv=$("topo"), pos=e=>{ const b=cv.getBoundingClientRect(); return [e.clientX-b.left, e.clientY-b.top]; };
   cv.addEventListener("contextmenu",e=>e.preventDefault());
   cv.addEventListener("pointerdown",e=>{ if(!V[cur].topo) return; const [mx,my]=pos(e), pan=e.button===2||e.ctrlKey||e.metaKey, k=pan ? -1 : topoHit(mx,my); cv.setPointerCapture(e.pointerId);
-    if(k>=0){ const t=V[cur].topo.isl[k]; topoDrag={kind:e.shiftKey?"turn":"move", k, mx, my, d:t.d.slice(), R:t.R.slice()}; }
+    if(k>=0){ const t=V[cur].topo.isl[k]; const G=topoGeometry(); topoDrag={kind:e.shiftKey?"turn":"move", k, mx, my, d:t.d.slice(), R:t.R.slice(), f:topoPersp(G).f(mv(TV.R,topoCentre(k,G))[2])}; }
     else topoDrag={kind:pan?"pan":"orbit", mx, my, tx:TV.tx, ty:TV.ty, R:TV.R.slice()}; cv.style.cursor="grabbing"; e.preventDefault(); });
   cv.addEventListener("pointermove",e=>{ if(!V[cur].topo) return; const [mx,my]=pos(e);
     if(!topoDrag){ const k=topoHit(mx,my); if(k!==topoHover){ topoHover=k; cv.style.cursor = k>=0 ? "move" : "grab"; topoRedraw(); } return; }
@@ -1021,7 +1092,7 @@ function topoRedraw(){ if(topoRAF) return; topoRAF=requestAnimationFrame(()=>{ t
       const cx=cv.clientWidth/2, cy=cv.clientHeight/2, Rn=orthonormal(mm(rotXY(dy*0.008,dx*0.008),D_.R));
       const pivot=mv(mt(D_.R),[(cx-D_.tx)/TV.scale, -(cy-D_.ty)/TV.scale, 0]), q=mv(Rn,pivot); TV.R=Rn; TV.tx=cx-TV.scale*q[0]; TV.ty=cy+TV.scale*q[1]; }
     else { const t=V[cur].topo.isl[D_.k];
-      if(D_.kind==="move"){ const wd=mv(mt(TV.R),[dx/TV.scale,-dy/TV.scale,0]); t.d=[D_.d[0]+wd[0],D_.d[1]+wd[1],D_.d[2]+wd[2]]; }
+      if(D_.kind==="move"){ const wd=mv(mt(TV.R),[dx/(TV.scale*D_.f),-dy/(TV.scale*D_.f),0]); t.d=[D_.d[0]+wd[0],D_.d[1]+wd[1],D_.d[2]+wd[2]]; }
       else t.R=orthonormal(mm(mm(mt(TV.R),mm(rotXY(dy*0.01,dx*0.01),TV.R)),D_.R)); }
     topoRedraw(); });
   const end=()=>{ if(topoDrag && topoDrag.kind!=="pan") topoSave(); topoDrag=null; cv.style.cursor = topoHover>=0 ? "move" : "grab"; };
@@ -1031,10 +1102,10 @@ function topoRedraw(){ if(topoRAF) return; topoRAF=requestAnimationFrame(()=>{ t
   cv.addEventListener("dblclick",e=>{ const [mx,my]=pos(e), k=topoHit(mx,my); if(k<0) return; const g=String(V[cur].topo.isl[k].g), sel=$("gstruct"); let o=[...sel.options].find(o=>o.value===g) || [...sel.options].find(o=>V[cur].S[+o.value] && String(V[cur].S[+o.value].graph_of)===g); if(o){ sel.value=o.value; setView("graph"); } });
   window.addEventListener("keydown",e=>{ if(view!=="topo"||topoHover<0||(e.key!=="f"&&e.key!=="F")||e.target.tagName==="INPUT"||e.target.tagName==="SELECT") return; const t=V[cur].topo.isl[topoHover]; t.R=mm(t.R,[-1,0,0,0,1,0,0,0,1]); topoSave(); topoRedraw(); });
   window.addEventListener("resize",()=>{ if(view==="topo") topoRedraw(); });
-  $("tmode").addEventListener("input",()=>{ $("tsep").value = $("tmode").value==="joint" ? 0 : 1; TV.fitted=""; draw(); });
+  $("tmode").addEventListener("input",()=>{ $("tsep").value = $("tmode").value==="isl" ? 1 : 0; TV.fitted=""; draw(); });
   $("tsep").addEventListener("input",topoRedraw); $("tsep").addEventListener("change",()=>{ topoFit(); topoRedraw(); });
   $("tlink").addEventListener("input",()=>{ $("tlinkv").textContent=$("tlink").value; topoRedraw(); });
-  ["tpts","tlinks","tlabels"].forEach(id=>$(id).addEventListener("input",topoRedraw)); $("tnode").addEventListener("input",()=>{ if(view==="topo") drawTopo(true); });
+  ["tpts","tlinks","tlabels","tpersp"].forEach(id=>$(id).addEventListener("input",topoRedraw)); $("tnode").addEventListener("input",()=>{ if(view==="topo") drawTopo(true); });
   $("treset").onclick=()=>{ V[cur].topo && V[cur].topo.isl.forEach(t=>{ t.d=[0,0,0]; t.R=I3(); }); TV.R=rotXY(-0.35,0.45); topoSave(); topoFit(); topoRedraw(); };
   $("tfit").onclick=()=>{ topoFit(); topoRedraw(); };
   $("tpng").onclick=()=>{ const a=document.createElement("a"); a.href=cv.toDataURL("image/png"); a.download="topology.png"; a.click(); };
