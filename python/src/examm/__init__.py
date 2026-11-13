@@ -18,12 +18,12 @@ from .dimension import DimIndexResult, dimensionality_index
 from .epsgraph import epsilon_graph
 from .hierarchy import HierarchicalAGTM, HNode, build_hierarchy
 from .pipeline import STAGES, Manifold, MultiManifoldLearner
-from .preprocess import SAF, DensityFilter, DensityThin, Pipeline, Preprocessor, PreprocessResult
+from .preprocess import LAAT, MBMS, SAF, DensityFilter, DensityThin, Pipeline, Preprocessor, PreprocessResult
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "AGTM", "DegenerateModelError", "DegenerateModelWarning", "DensityFilter", "DensityThin", "DimIndexResult",
+    "AGTM", "DegenerateModelError", "DegenerateModelWarning", "DensityFilter", "DensityThin", "DimIndexResult", "LAAT", "MBMS",
     "HNode", "HierarchicalAGTM", "Manifold", "ManifoldGraph", "MultiManifoldLearner", "MultiManifoldModel", "Pipeline",
     "PreprocessResult", "Preprocessor", "SAF", "STAGES", "build_hierarchy", "crawl", "datasets", "dimensionality_index",
     "epsilon_graph", "io", "multi_manifold_crawl", "preprocess", "set_num_threads",

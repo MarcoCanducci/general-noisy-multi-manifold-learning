@@ -1,7 +1,9 @@
 """Preprocessing: turn a raw point cloud into a (noisy, diffused) pair of aligned point sets.
 
-Every step implements the small :class:`Preprocessor` interface, so alternative denoisers
-(e.g. LAAT, MBMS) can be plugged in without touching the rest of the pipeline::
+The default steps are :class:`SAF` (diffusion) and :class:`DensityFilter`; :class:`LAAT` and
+:class:`MBMS`, the filtering and diffusion steps of 1-DREAM, can replace them. Every step
+implements the small :class:`Preprocessor` interface, so further denoisers can be plugged in
+without touching the rest of the pipeline::
 
     class MyStep(Preprocessor):
         def apply(self, state, r):
@@ -22,7 +24,7 @@ import numpy as np
 from ._util import as_points, build_tree, check_radius, rng_from
 
 __all__ = [
-    "PreprocessResult", "Preprocessor", "SAF", "DensityFilter", "DensityThin", "Pipeline", "Identity",
+    "PreprocessResult", "Preprocessor", "SAF", "DensityFilter", "DensityThin", "LAAT", "MBMS", "Pipeline", "Identity",
     "register", "available", "resolve",
 ]
 
@@ -233,6 +235,214 @@ class DensityThin(Preprocessor):
         return out
 
 
+def _otsu(v, bins: int = 200) -> float:
+    """Value that best splits ``v`` in two groups (largest between-group variance)."""
+    h, e = np.histogram(v, bins)
+    c = (e[:-1] + e[1:]) / 2
+    w, m = np.cumsum(h), np.cumsum(h * c)
+    inner = (w > 0) & (w < w[-1])                       # a split must leave points on both sides
+    if not inner.any():
+        return float(c[0])
+    q = np.full(len(c), -np.inf)
+    q[inner] = (m[-1] * w[inner] / w[-1] - m[inner]) ** 2 / (w[inner] * (w[-1] - w[inner]))
+    k = int(np.argmax(q))
+    return float(e[k + 1])                              # upper edge of the last bin of the lower group
+
+
+class LAAT(Preprocessor):
+    """Locally Aligned Ant Technique: keep the points on which random-walking ants leave pheromone.
+
+    After Taghribi et al. (2022), the filtering step of 1-DREAM. Ants jump between neighbouring
+    points; a jump from ``i`` to ``j`` has probability proportional to
+    ``exp(beta * ((1 - kappa) * F_j + kappa * E_ij))``, where ``F`` is the pheromone on ``j`` and
+    ``E_ij`` the alignment of the jump with the principal directions of the neighbourhood of
+    ``i`` (weighted by its normalised eigenvalues). Each visit deposits pheromone, which
+    evaporates after every epoch. Ants therefore gather on dense, elongated structures, and the
+    points with little pheromone are removed. It is an alternative to :class:`DensityFilter`
+    that favours aligned structures over merely dense ones; it is most useful for filaments.
+
+    This is a vectorised NumPy implementation of the published rules, not the 1-DREAM C++ code:
+    ``F`` and ``E`` are normalised by their largest value in each neighbourhood, and the dynamic
+    radius of that code is not included.
+
+    Parameters
+    ----------
+    radius : float, optional
+        Neighbourhood radius of the ants. Default ``radius_factor * r``.
+    radius_factor : float
+        Used when ``radius`` is None (default 0.7). The radius should be small enough that
+        background points have fewer than ``min_neighbours`` neighbours.
+    n_ants, n_epochs, n_steps : int
+        Number of ants, of epochs, and of jumps of every ant per epoch. Ants are placed at random
+        at the start of every epoch.
+    kappa : float
+        Weight of the alignment against the pheromone, in [0, 1].
+    beta : float
+        Inverse temperature of the jump probabilities.
+    evaporation : float
+        Share of the pheromone lost after every epoch.
+    min_neighbours : int
+        Ants only stand on points with at least this many neighbours.
+    threshold : "otsu" or float
+        Points with more pheromone are kept. ``"otsu"`` splits the log-pheromone in two groups;
+        a number is a multiple of the mean pheromone. The pheromone of every point is returned
+        in ``info["laat_pheromone_all"]`` to help choosing it.
+    random_state : int or Generator
+        Seed of the walks (default 0).
+    """
+
+    name = "laat"
+
+    def __init__(self, radius: float | None = None, radius_factor: float = 0.7, n_ants: int = 100,
+                 n_epochs: int = 25, n_steps: int = 200, kappa: float = 0.5, beta: float = 5.0,
+                 evaporation: float = 0.1, min_neighbours: int = 5, threshold="otsu", random_state=0):
+        if not 0 <= kappa <= 1:
+            raise ValueError("kappa must lie in [0, 1]")
+        if not 0 <= evaporation < 1:
+            raise ValueError("evaporation must lie in [0, 1)")
+        self.radius = radius
+        self.radius_factor = radius_factor
+        self.n_ants = n_ants
+        self.n_epochs = n_epochs
+        self.n_steps = n_steps
+        self.kappa = kappa
+        self.beta = beta
+        self.evaporation = evaporation
+        self.min_neighbours = min_neighbours
+        self.threshold = threshold
+        self.random_state = random_state
+
+    def pheromone(self, X, r: float) -> np.ndarray:
+        """Pheromone left on every row of ``X`` (neighbourhood radius ``r``)."""
+        X = as_points(X)
+        n, d = X.shape
+        seed = self.random_state
+        rng = rng_from(seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed))
+        tree = build_tree(X)
+        indptr, idx, dist = tree.radius_neighbors(X, float(r))
+        row = np.repeat(np.arange(n), np.diff(indptr))
+        other = idx != row
+        row, idx, dist = row[other], idx[other], dist[other]
+        deg = np.bincount(row, minlength=n)
+        indptr = np.r_[0, np.cumsum(deg)]
+        ok = deg >= int(self.min_neighbours)
+        F = np.full(n, 1e-6)
+        if not ok.any() or len(idx) == 0:
+            return F
+        # alignment of every possible jump with the local principal directions
+        _, ev, vec = tree.local_pca(X, float(r), d, 2)
+        lam = ev / np.maximum(ev.sum(1, keepdims=True), 1e-300)
+        diff = X[idx] - X[row]
+        cos = np.abs(np.einsum("ed,ekd->ek", diff, vec[row])) / np.maximum(dist, 1e-300)[:, None]
+        E = (cos * lam[row]).sum(1)
+        top = np.zeros(n)
+        np.maximum.at(top, row, E)
+        E /= np.maximum(top[row], 1e-300)
+        allowed = ok[row] & ok[idx]                       # ants only stand on well-populated points
+        starts = np.flatnonzero(ok)
+        deposit = n / float(self.n_ants * self.n_steps)   # about one unit per point and epoch
+        first, last = indptr[:-1], indptr[1:] - 1
+        for _ in range(int(self.n_epochs)):
+            top[:] = 0.0
+            np.maximum.at(top, row, F[idx])
+            p = np.where(allowed, np.exp(self.beta * ((1 - self.kappa) * F[idx] / top[row] + self.kappa * E - 1.0)), 0.0)
+            cum = np.cumsum(p)
+            base = np.where(first > 0, cum[np.maximum(first - 1, 0)], 0.0)
+            total = np.where(deg > 0, cum[np.maximum(last, 0)] - base, 0.0)
+            ants = rng.choice(starts, int(self.n_ants))
+            add = np.zeros(n)
+            for _ in range(int(self.n_steps)):
+                move = total[ants] > 0
+                a = ants[move]
+                e = np.searchsorted(cum, base[a] + rng.random(len(a)) * total[a], side="right")
+                ants[move] = idx[np.clip(e, first[a], last[a])]
+                np.add.at(add, ants[move], deposit)
+            F = (1 - self.evaporation) * (F + add)
+        return F
+
+    def apply(self, state, r):
+        rad = check_radius(self.radius if self.radius is not None else self.radius_factor * r, "radius")
+        F = self.pheromone(state.noisy, rad)
+        if self.threshold == "otsu":
+            thr = float(np.exp(_otsu(np.log(F)))) if F.max() > F.min() else float(F.max())
+        else:
+            thr = float(self.threshold) * float(F.mean())
+        keep = F > thr
+        out = state.select(keep)
+        out.info["laat_pheromone"] = F[keep]
+        out.info["laat_pheromone_all"] = F
+        out.info["laat_threshold"] = thr
+        return out
+
+
+class MBMS(Preprocessor):
+    """Manifold blurring mean shift: move points onto the mean axis (or surface) of a structure.
+
+    After Wang & Carreira-Perpinan (2010), the diffusion step of 1-DREAM. Each iteration moves
+    every point towards the Gaussian-weighted mean of its neighbours, but only in the directions
+    orthogonal to its local tangent space (the ``dim`` leading principal directions of its
+    neighbourhood), so points close in on the structure without sliding along it. It is an
+    alternative to :class:`SAF`.
+
+    Few iterations are enough; many iterations slowly pull curved structures towards their
+    centre of curvature. This is a vectorised NumPy implementation of the published rule, not
+    the 1-DREAM C++ code.
+
+    Parameters
+    ----------
+    radius : float, optional
+        Neighbourhood radius. Default ``radius_factor * r``.
+    radius_factor : float
+        Used when ``radius`` is None (default 0.7).
+    sigma : float, optional
+        Scale of the Gaussian weights. Default ``sigma_factor * radius``.
+    sigma_factor : float
+        Used when ``sigma`` is None (default 0.35).
+    dim : int
+        Dimension of the tangent space that is left untouched: the intrinsic dimension of the
+        structures of interest (1 for filaments).
+    n_iter : int
+        Number of iterations.
+    """
+
+    name = "mbms"
+
+    def __init__(self, radius: float | None = None, radius_factor: float = 0.7, sigma: float | None = None,
+                 sigma_factor: float = 0.35, dim: int = 1, n_iter: int = 5):
+        if dim < 1:
+            raise ValueError("dim must be at least 1")
+        self.radius = radius
+        self.radius_factor = radius_factor
+        self.sigma = sigma
+        self.sigma_factor = sigma_factor
+        self.dim = dim
+        self.n_iter = n_iter
+
+    def apply(self, state, r):
+        rad = check_radius(self.radius if self.radius is not None else self.radius_factor * r, "radius")
+        sigma = check_radius(self.sigma if self.sigma is not None else self.sigma_factor * rad, "sigma")
+        Y = state.diffused
+        n, d = Y.shape
+        k = int(min(self.dim, d - 1))
+        shifts = []
+        for _ in range(int(self.n_iter)):
+            tree = build_tree(Y)
+            indptr, idx, dist = tree.radius_neighbors(Y, rad)          # every point is its own neighbour
+            w = np.exp(-dist ** 2 / (2 * sigma ** 2))
+            mean = np.add.reduceat(w[:, None] * Y[idx], indptr[:-1], axis=0) / np.add.reduceat(w, indptr[:-1])[:, None]
+            shift = mean - Y
+            counts, _, vec = tree.local_pca(Y, rad, k, k + 2)
+            U = vec[:, :k, :]                                          # (n, k, d) tangent directions
+            shift -= np.einsum("nkd,nk->nd", U, np.einsum("nkd,nd->nk", U, shift))
+            shift[counts < k + 2] = 0.0
+            Y = Y + shift
+            shifts.append(float(np.linalg.norm(shift, axis=1).mean()))
+        out = state.with_diffused(np.ascontiguousarray(Y))
+        out.info["mbms_mean_shift"] = shifts
+        out.info["mbms_displacement"] = np.linalg.norm(Y - state.noisy, axis=1)
+        return out
+
+
 class Pipeline(Preprocessor):
     """Apply several preprocessing steps in sequence."""
 
@@ -261,6 +471,9 @@ _REGISTRY: dict[str, Callable[[], Preprocessor]] = {
     "density": DensityFilter,
     "thin": DensityThin,
     "thin+saf": lambda: Pipeline([DensityThin(), SAF(), DensityFilter()]),
+    "laat": LAAT,
+    "mbms": MBMS,
+    "laat+mbms": lambda: Pipeline([LAAT(), MBMS()]),
 }
 
 

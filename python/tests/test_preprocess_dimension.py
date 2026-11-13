@@ -143,3 +143,52 @@ def test_density_thinning_evens_out_the_sampling(rng):
     assert isinstance(resolve("thin"), DensityThin)
     with pytest.raises(ValueError):
         DensityThin(target=0)
+
+
+def _curve_in_noise(seed=7):
+    rng = np.random.default_rng(seed)
+    curve = lambda t: np.c_[2 * np.cos(1.5 * np.pi * t), 2 * np.sin(1.5 * np.pi * t), 1.7 * (2 * t - 1)]  # noqa: E731
+    X = np.r_[curve(rng.uniform(0, 1, 1200)) + rng.normal(0, 0.1, (1200, 3)), rng.uniform(-3, 3, (2000, 3))]
+    return X, np.r_[np.ones(1200, bool), np.zeros(2000, bool)], curve(np.linspace(0, 1, 600))
+
+
+def test_laat_keeps_the_filament_and_drops_the_background():
+    import examm
+
+    X, truth, _ = _curve_in_noise()
+    out = examm.LAAT().fit_transform(X, 0.5)
+    keep = np.zeros(len(X), bool)
+    keep[out.indices] = True
+    assert (keep & truth).sum() / truth.sum() > 0.95          # nearly all of the curve survives
+    assert (keep & truth).sum() / keep.sum() > 0.8            # and most of what survives is curve
+    F = out.info["laat_pheromone_all"]
+    assert F.shape == (len(X),) and F[truth].sum() > 0.85 * F.sum()
+    again = examm.LAAT().fit_transform(X, 0.5)
+    assert np.array_equal(out.indices, again.indices)         # reproducible with the default seed
+    assert len(examm.LAAT(threshold=1e9).fit_transform(X, 0.5)) == 0
+
+
+def test_mbms_moves_points_onto_the_axis_without_sliding_along_it():
+    import examm
+    from scipy.spatial import cKDTree
+
+    X, truth, axis = _curve_in_noise()
+    P = X[truth]
+    out = examm.MBMS(dim=1).fit_transform(P, 0.5)
+    tree = cKDTree(axis)
+    d0, i0 = tree.query(P)
+    d1, i1 = tree.query(out.diffused)
+    assert np.median(d1) < 0.25 * np.median(d0)
+    assert np.median(np.abs(i1 - i0)) <= 3                    # the position along the curve is kept
+    assert np.array_equal(out.noisy, P) and len(out.info["mbms_mean_shift"]) == 5
+
+
+def test_laat_and_mbms_drive_the_pipeline():
+    import examm
+
+    X, _, _ = _curve_in_noise()
+    assert {"laat", "mbms", "laat+mbms"} <= set(examm.preprocess.available())
+    m = examm.MultiManifoldLearner(r=0.5, preprocess="laat+mbms", dims=[1], random_state=0).fit(X)
+    assert [n for n, _ in m.preprocess_.info["steps"]] == ["LAAT", "MBMS"]
+    big = max(m.manifolds_, key=lambda q: q.n_points)
+    assert big.dim == 1 and big.n_points > 900

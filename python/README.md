@@ -58,7 +58,7 @@ Each stage can also be used on its own.
 
 | Stage | Function / class | What it does |
 |---|---|---|
-| Preprocess | `examm.SAF`, `examm.DensityFilter`, `examm.DensityThin`, `examm.Pipeline` | Diffuses points towards the cores of the structures and removes points in sparse regions. `DensityThin` optionally thins over-dense regions first, for data whose density spans orders of magnitude. Returns row-aligned *noisy* and *diffused* point sets. |
+| Preprocess | `examm.SAF`, `examm.DensityFilter`, `examm.DensityThin`, `examm.LAAT`, `examm.MBMS`, `examm.Pipeline` | Diffuses points towards the cores of the structures and removes points in sparse regions. `DensityThin` optionally thins over-dense regions first, for data whose density spans orders of magnitude. `LAAT` and `MBMS` are the 1-DREAM alternatives for filtering and diffusion (see below). Returns row-aligned *noisy* and *diffused* point sets. |
 | Dimensionality index | `examm.dimensionality_index` | Local PCA; the normalised spectrum is compared with the ideal spectra on the probability simplex (Fisher metric), then smoothed spatially. |
 | Graphs | `examm.multi_manifold_crawl`, `examm.crawl`, `examm.epsilon_graph` | Manifold crawling builds a graph skeleton of every manifold of a given dimension; the epsilon-graph is the faster, less stable alternative of the paper's section 4.3. |
 | Density model | `examm.AGTM`, `examm.MultiManifoldModel` | Abstract GTM: manifold-aligned Gaussian mixture on each graph, trained by EM; all models combine into one hierarchical mixture. Also gives curvature along graph edges and node-wise means of any per-point quantity. |
@@ -72,9 +72,39 @@ model  = examm.AGTM(graphs[0]).fit(pre.noisy[sel][graphs[0].points])
 model.edge_curvature(); model.score_samples(X); model.node_means(X, some_quantity)
 ```
 
+### LAAT and MBMS (the 1-DREAM preprocessing)
+
+The filtering and diffusion steps of 1-DREAM can replace the default ones:
+
+```python
+pre = examm.Pipeline([examm.LAAT(), examm.MBMS(dim=1)])        # or preprocess="laat+mbms"
+learner = examm.MultiManifoldLearner(r=0.5, preprocess=pre, dims=[1]).fit(X)
+learner.preprocess_.info["laat_pheromone_all"]                 # pheromone of every input point
+```
+
+| Step | Replaces | What it does | When to prefer it |
+|---|---|---|---|
+| `examm.LAAT` | `DensityFilter` | Ants walk between neighbouring points, preferring jumps aligned with the local principal directions and points that already carry pheromone; points that collect little pheromone are removed (Taghribi et al. 2022). | Filaments and other elongated structures in a background that is dense in places: it selects aligned structures, not merely dense ones. |
+| `examm.MBMS` | `SAF` | Moves every point towards the weighted mean of its neighbours, only across the local tangent space of dimension `dim` (Wang & Carreira-Perpinan 2010). | Structures of one known intrinsic dimension (`dim=1` for filaments). `SAF` needs no `dim` and is the better choice for data with manifolds of several dimensions. |
+
+The two can be mixed with the default steps (for example `[LAAT(), SAF()]`), and they work in any
+ambient dimension. Points to keep in mind:
+
+- The radius of the ants (`radius_factor * r`, default 0.7 r) should be small enough that background
+  points have fewer than `min_neighbours` neighbours; otherwise ants also reinforce chance alignments
+  in the background.
+- `LAAT(threshold="otsu")` splits the log-pheromone in two groups; pass a number to keep the points
+  with more than that multiple of the mean pheromone.
+- `MBMS` needs few iterations (default 5). With many, curved structures drift towards their centre
+  of curvature.
+- Both are vectorised NumPy implementations of the published update rules, written for this
+  package. They are not the 1-DREAM C++ code: the pheromone and alignment terms are normalised by
+  their largest value in each neighbourhood, and the dynamic neighbourhood radius of that code is
+  not included. On 40,000 points in 3-D the two steps together take about 13 s.
+
 ### Plugging in another preprocessing step
 
-Denoisers such as LAAT or MBMS (or your own) fit in by implementing one method:
+Your own denoiser fits in by implementing one method:
 
 ```python
 from examm.preprocess import Preprocessor
@@ -258,8 +288,7 @@ where a different choice is numerically sounder, it deviates. All of these are p
 | Curvature | eq. 23 (second difference) | – | eq. 22 (change of unit tangent per arc length, default) or eq. 23 |
 | Combined model | hierarchical mixture | manifold weights not normalised by component count | weights proportional to points per manifold; optional uniform background |
 
-Things that are **not** included: the LAAT and MBMS preprocessing of 1-DREAM (the interface for
-adding them is there), and iso-surface rendering of the density.
+Things that are **not** included: the dynamic neighbourhood radius of the 1-DREAM LAAT code.
 
 ## Tests
 
