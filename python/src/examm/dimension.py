@@ -47,49 +47,44 @@ def barycentric(spectrum) -> np.ndarray:
     return np.clip((L - nxt) * np.arange(1, L.shape[-1] + 1), 0.0, 1.0)
 
 
-def _weighted_local_pca(tree, X, r, w, n_vec, chunk=2_000_000):
+def _weighted_local_pca(tree, X, r, w, n_vec, block=1024):
     """Local PCA in which neighbour ``j`` counts with weight ``w[j]`` -> counts, eigenvalues, vectors."""
     n, d = X.shape
-    indptr, idx, _ = tree.radius_neighbors(X, float(r))
-    counts = np.diff(indptr)
+    counts = np.zeros(n, dtype=np.int64)
     ev = np.zeros((n, d))
     vec = np.zeros((n, n_vec, d))
-    start = 0
-    while start < n:                                    # rows in blocks of bounded size
-        stop = max(int(np.searchsorted(indptr, indptr[start] + chunk, side="right")) - 1, start + 1)
-        stop = min(stop, n)
-        lo, hi = indptr[start], indptr[stop]
-        j = idx[lo:hi]
-        off = indptr[start:stop] - lo
+    for start in range(0, n, block):                    # neighbour lists are queried block by block
+        stop = min(start + block, n)
+        indptr, j, _ = tree.radius_neighbors(np.ascontiguousarray(X[start:stop]), float(r))
+        cnt = np.diff(indptr)
+        off = indptr[:-1]
         wj = w[j]
         sw = np.add.reduceat(wj, off)
         mean = np.add.reduceat(wj[:, None] * X[j], off, axis=0) / sw[:, None]
-        Dc = X[j] - np.repeat(mean, counts[start:stop], axis=0)
-        C = np.add.reduceat(wj[:, None, None] * Dc[:, :, None] * Dc[:, None, :], off, axis=0) / sw[:, None, None]
-        val, V = np.linalg.eigh(C)
+        Dc = (X[j] - np.repeat(mean, cnt, axis=0)) * np.sqrt(wj)[:, None]
+        C = np.zeros((stop - start, d, d))
+        for a_ in range(d):                             # one column at a time keeps the memory at entries x d
+            C[:, a_, :] = np.add.reduceat(Dc[:, a_, None] * Dc, off, axis=0)
+        val, V = np.linalg.eigh(C / sw[:, None, None])
+        counts[start:stop] = cnt
         ev[start:stop] = np.maximum(val[:, ::-1], 0.0)
         if n_vec:
             vec[start:stop] = np.transpose(V[:, :, ::-1], (0, 2, 1))[:, :n_vec]
-        start = stop
     return counts, ev, vec
 
 
-def _weighted_smooth(tree, X, P, r, sigma, valid, w, chunk=2_000_000):
+def _weighted_smooth(tree, X, P, r, sigma, valid, w, block=1024):
     """Gaussian average of the rows of ``P`` over neighbours, neighbour ``j`` weighted by ``w[j]``."""
     n = len(X)
-    indptr, idx, dist = tree.radius_neighbors(X, float(r))
     out = np.zeros_like(P)
-    start = 0
-    while start < n:
-        stop = max(int(np.searchsorted(indptr, indptr[start] + chunk, side="right")) - 1, start + 1)
-        stop = min(stop, n)
-        lo, hi = indptr[start], indptr[stop]
-        j = idx[lo:hi]
-        g = np.exp(-dist[lo:hi] ** 2 / (2 * sigma ** 2)) * w[j] * valid[j]
-        off = indptr[start:stop] - lo
+    for start in range(0, n, block):
+        stop = min(start + block, n)
+        indptr, j, dist = tree.radius_neighbors(np.ascontiguousarray(X[start:stop]), float(r))
+        g = np.exp(-dist ** 2 / (2 * sigma ** 2)) * w[j] * valid[j]
+        off = indptr[:-1]
         den = np.add.reduceat(g, off)
-        out[start:stop] = np.add.reduceat(g[:, None] * P[j], off, axis=0) / np.maximum(den, 1e-300)[:, None]
-        start = stop
+        for k in range(P.shape[1]):
+            out[start:stop, k] = np.add.reduceat(g * P[j, k], off) / np.maximum(den, 1e-300)
     out[~valid.astype(bool)] = 0.0
     return out
 
