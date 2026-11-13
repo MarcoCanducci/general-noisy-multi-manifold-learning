@@ -115,9 +115,12 @@ class App:
                              "searched. All selected features are used in every computation; the axes below "
                              "only control the 3-D view."),
             self.w_features, self.w_standardise, self.b_features, pn.layout.Divider(),
-            pn.pane.Markdown("**Scale** — *r* is the radius of the local neighbourhoods used everywhere: it "
-                             "should be larger than the noise thickness and smaller than the distance between "
-                             "separate structures. Tick *Scale r* under Layers to see it in the view."),
+            pn.pane.Markdown("**Scale** — *r* is the radius of the local neighbourhoods used everywhere. It is the "
+                             "physical size at which a structure is locally linear: the scale at which it can be "
+                             "approximated by a flat patch of its own dimension (a segment for a curve, a piece of "
+                             "plane for a surface). It has to be larger than the noise across the structures, and "
+                             "small enough that a neighbourhood does not span their curvature or two separate "
+                             "structures. Tick *Scale r* under Layers to see it in the view."),
             pn.Row(self.w_r, pn.Column(pn.Spacer(height=18), self.b_suggest)), pn.layout.Divider(),
             pn.pane.Markdown("**View**"), pn.Row(*self.w_ax), self.w_pca, self.w_colour)
 

@@ -46,8 +46,11 @@ learner.predict(X)        # most probable manifold
 ```
 
 `r`, the **characteristic scale**, is the only required parameter: the radius of the local
-neighbourhoods. It must be larger than the thickness of the noise around the structures and
-smaller than the distance between separate structures.
+neighbourhoods. It is the physical size at which a structure is locally linear, that is, the
+scale at which it can be approximated by a flat patch of its own dimension (a segment for a
+curve, a piece of plane for a surface). It expresses what you consider one structure in your
+data. It has to be larger than the noise across the structures, and small enough that a
+neighbourhood does not span their curvature or two separate structures.
 
 Every intermediate result is kept, and changing a parameter recomputes only what depends on it:
 

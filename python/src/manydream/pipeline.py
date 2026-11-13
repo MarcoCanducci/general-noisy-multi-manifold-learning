@@ -63,8 +63,10 @@ class MultiManifoldLearner:
     Parameters
     ----------
     r : float
-        Characteristic scale: radius of the local linearisations used by the dimensionality
-        index and by crawling. The single most important parameter.
+        Characteristic scale: radius of the local neighbourhoods used by the dimensionality
+        index and by crawling. It is the physical size at which a structure is locally linear,
+        i.e. can be approximated by a flat patch of its own dimension; larger than the noise
+        across the structures. The single most important parameter.
     preprocess : str, Preprocessor, list or None
         Denoising / diffusion stage. ``"saf"`` (default) runs SAF diffusion followed by the
         density filter; ``None`` uses the data as they are; any object implementing
