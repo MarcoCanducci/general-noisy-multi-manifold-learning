@@ -228,6 +228,35 @@ again; `examples/05_viewer_for_your_data.py` does both from the command line.
   passed as `extra=` or loaded later in the page from a CSV (one line per point in the original
   order, or with a `row` column holding the point index). A loaded file stays in the browser.
 
+## Views of one-dimensional manifolds (1-DREAM)
+
+`examm.streamviz` implements the two visualisation techniques of the 1-DREAM paper (Canducci et al.
+2022, section 4) for quantities carried by the points of a filament or stream. Both use the fitted
+1-D model (the stream GTM) for the curve and its tangents.
+
+```python
+from examm import streamviz as sv
+
+m = learner.manifolds_[0]                                   # a 1-D manifold
+values = {"temperature": T, "density": rho}                 # one value per point of X
+
+prof = sv.bidimensional_profile(m, X, values, r_max=0.5, n_radial=19)
+sv.plot_bidimensional_profile(prof)                         # along the manifold x distance from its core
+
+frames = sv.comoving_frames(m, X, values, side=1.0)         # planes perpendicular to a refined spine
+sv.plot_comoving_frame(frames, 40, X)                       # one frame
+sv.animate_comoving_frames(frames, "stream.mp4", X)         # the movie
+```
+
+| View | What it shows | Parameters (paper's symbols) |
+|---|---|---|
+| Bi-dimensional profile | The mean of each quantity in cylindrical shells around every segment of the curve, as one image: position along the manifold against distance from its core. | `r_max` (r_M), `n_radial` (c) |
+| Co-moving orthonormal frames | A plane perpendicular to the curve, with a pair of axes that stays consistent along it, moved along a refined spine; on each plane the quantities, the point density and the density of the fitted model are mapped on a grid. | `side` (a), `n_pixels` (M = 25), `upsample` (N = 5), `depth` (b) |
+
+Means are Gaussian-weighted; the SPH weights of the paper are not implemented. In 3-D the in-plane
+axes are those of the paper (eq. 55-56); in other dimensions a basis carried along the curve is used.
+With sparse data, increase `half_thickness` so that every plane holds enough points.
+
 ## GUI
 
 ```bash

@@ -337,16 +337,16 @@ def plot_comoving_frame(result, k: int, X=None, *, names=None, limits=None, cmap
         for col, pts, title in ((ncol + 2, X[near], "position on the manifold"), (ncol + 3, X[sub], "position in the data set")):
             if col > 2 * ncol:
                 break
-            ax = fig.add_subplot(2, ncol, col, projection="3d")
+            ax = fig.add_subplot(2, ncol, col, projection="3d", computed_zorder=False)
             Q = pad(pts)
-            ax.scatter(*Q.T, s=1.5, color=NOISE, linewidths=0, depthshade=False, alpha=0.6)
-            ax.plot(*pad(P).T, color=INK, linewidth=1.2)
-            ax.scatter(*pad(c[None]).T, s=70, color="#e34948", depthshade=False)
+            ax.scatter(*Q.T, s=1.5, color=NOISE, linewidths=0, depthshade=False, alpha=0.45, zorder=1)
+            ax.plot(*pad(P).T, color=INK, linewidth=1.2, zorder=2)
+            ax.scatter(*pad(c[None]).T, s=90, color="#e34948", edgecolors="white", linewidths=0.8, depthshade=False, zorder=4)
             if title == "position on the manifold":
                 a = result["side"] / 2
                 u1, u2 = result["axes"][k]
                 sq = np.array([c + s1 * a * u1 + s2 * a * u2 for s1, s2 in ((-1, -1), (1, -1), (1, 1), (-1, 1), (-1, -1))])
-                ax.plot(*pad(sq).T, color="#2a78d6", linewidth=1.2)
+                ax.plot(*pad(sq).T, color="#2a78d6", linewidth=1.4, zorder=3)
             ax.set_title(title, fontsize=9, color=INK)
             ax.set_axis_off()
             ax.set_box_aspect((1, 1, 1))

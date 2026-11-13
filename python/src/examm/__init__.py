@@ -10,7 +10,7 @@ Quick start::
     learner = examm.MultiManifoldLearner(r=0.1, random_state=0).fit(X)
     print(learner.summary())
 """
-from . import datasets, io, preprocess, viewer
+from . import datasets, io, preprocess, streamviz, viewer
 from ._util import set_num_threads
 from .agtm import AGTM, DegenerateModelError, DegenerateModelWarning, MultiManifoldModel
 from .crawling import ManifoldGraph, crawl, multi_manifold_crawl
