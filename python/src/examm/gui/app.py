@@ -241,11 +241,38 @@ class App:
                                         label="Download interactive viewer (HTML)", button_type="primary")
         self.w_manifold.param.watch(lambda e: self._guard(self._explore), "value")
         self.w_quantity.param.watch(lambda e: self._guard(self._explore), "value")
+        # the two 1-DREAM views of a filament
+        self.w_sv_vals = W.MultiChoice(name="Quantities (columns of the table)", options=[], value=[], max_items=3)
+        self.w_sv_rmax = W.FloatInput(name="Profile: largest distance from the core", value=0.1, start=1e-12, width=260)
+        self.w_sv_nrad = W.IntSlider(name="Profile: radial bins", start=5, end=40, value=19)
+        self.b_sv_prof = W.Button(name="Bi-dimensional profile", button_type="primary")
+        self.fig_sv_prof = pn.pane.Matplotlib(None, tight=True, dpi=90, sizing_mode="stretch_width")
+        self.w_sv_side = W.FloatInput(name="Frames: side of the plane", value=0.2, start=1e-12, width=260)
+        self.w_sv_up = W.IntSlider(name="Frames: points inserted between centres", start=0, end=10, value=5)
+        self.w_sv_thick = W.FloatInput(name="Frames: half thickness of the slab (0 = automatic)", value=0.0, start=0.0, width=260)
+        self.b_sv_frames = W.Button(name="Co-moving frames", button_type="primary")
+        self.w_sv_frame = W.IntSlider(name="Frame", start=0, end=1, value=0, visible=False)
+        self.fig_sv_frame = pn.pane.Matplotlib(None, tight=True, dpi=80, sizing_mode="stretch_width")
+        self.dl_sv_movie = W.FileDownload(callback=self._dl_frames_movie, filename="comoving_frames.mp4",
+                                          label="Download the frames as a movie", button_type="default", visible=False)
+        self.sv_info = pn.pane.Markdown("")
+        self._sv_frames = None
+        self.b_sv_prof.on_click(lambda e: self._guard(self._sv_profile))
+        self.b_sv_frames.on_click(lambda e: self._guard(self._sv_compute_frames))
+        self.w_sv_frame.param.watch(lambda e: self._guard(self._sv_show_frame), "value_throttled")
+        self.sv_box = pn.Column(
+            pn.pane.Markdown("**Views of a filament (1-DREAM)** — for a 1-D manifold. The *bi-dimensional profile* "
+                             "shows each quantity against the position along the filament and the distance from its "
+                             "core. The *co-moving frames* show the quantities, the point density and the fitted "
+                             "model on a plane perpendicular to the filament, moved along it."),
+            self.w_sv_vals, pn.Row(self.w_sv_rmax, self.w_sv_nrad), self.b_sv_prof, self.fig_sv_prof,
+            pn.Row(self.w_sv_side, self.w_sv_up), self.w_sv_thick, self.b_sv_frames, self.sv_info, self.w_sv_frame,
+            self.fig_sv_frame, self.dl_sv_movie, visible=False)
         tab_exp = pn.Column(
             pn.pane.Markdown("**7. Explore & export** — select a manifold to isolate it in the view. For 1-D "
                              "manifolds the quantity is shown along the filament, for higher dimensions on the "
                              "unfolded graph."),
-            self.w_manifold, self.w_quantity, self.fig_explore, pn.layout.Divider(),
+            self.w_manifold, self.w_quantity, self.fig_explore, self.sv_box, pn.layout.Divider(),
             pn.pane.Markdown("The **interactive viewer** is a single HTML page that opens in any browser, without "
                              "this app: the data and the structures in 3-D, each structure's unfolded graph, all "
                              "structures together, outliers by percentile or threshold for several criteria, and "
@@ -589,6 +616,17 @@ class App:
             return
         k = self.w_manifold.value
         self.refresh_view()
+        is_curve = k is not None and k >= 0 and L.manifolds_[k].dim == 1 and L.manifolds_[k].agtm is not None
+        if self.sv_box.visible != is_curve or getattr(self, "_sv_for", None) != k:
+            self.sv_box.visible, self._sv_for, self._sv_frames = is_curve, k, None
+            self.fig_sv_prof.object = self.fig_sv_frame.object = None
+            self.w_sv_frame.visible = self.dl_sv_movie.visible = False
+            self.sv_info.object = ""
+            if is_curve:
+                passive = [c for c in self.columns if c not in self.feature_names]
+                self.w_sv_vals.options = list(self.columns)
+                self.w_sv_vals.value = (passive or list(self.feature_names))[:2]
+                self.w_sv_rmax.value, self.w_sv_side.value = float(L.r), 2.0 * float(L.r)
         if k is None or k < 0:
             self._fig(self.fig_explore, viz.plot_loglik(L, figsize=(6, 3.4)))
             return
@@ -605,6 +643,54 @@ class App:
         else:
             fig = viz.plot_unfolded(m, node_values=m.agtm.node_means(self.X, vals), label=q, figsize=(5.5, 4.6))
         self._fig(self.fig_explore, fig)
+
+    # ------------------------------------------------------------------ views of a filament
+    def _sv_target(self):
+        L = self._need_fit()
+        k = self.w_manifold.value
+        if k is None or k < 0 or L.manifolds_[k].dim != 1 or L.manifolds_[k].agtm is None:
+            raise ValueError("select a fitted 1-D manifold first")
+        return L.manifolds_[k], {c: self.table[:, self.columns.index(c)] for c in self.w_sv_vals.value}
+
+    def _sv_profile(self):
+        from examm import streamviz as sv
+
+        m, vals = self._sv_target()
+        res = sv.bidimensional_profile(m, self.X, vals, r_max=float(self.w_sv_rmax.value), n_radial=int(self.w_sv_nrad.value))
+        self._fig(self.fig_sv_prof, sv.plot_bidimensional_profile(res, figsize=(7, 1.7 * (len(vals) + 1) + 0.7)))
+        self._say("Bi-dimensional profile: position along the filament against distance from its core.", "success")
+
+    def _sv_compute_frames(self):
+        from examm import streamviz as sv
+
+        m, vals = self._sv_target()
+        self._sv_frames = sv.comoving_frames(m, self.X, vals, side=float(self.w_sv_side.value), upsample=int(self.w_sv_up.value),
+                                             half_thickness=float(self.w_sv_thick.value) or None)
+        n = len(self._sv_frames["centers"])
+        self.w_sv_frame.param.update(start=0, end=n - 1, value=n // 2, visible=True)
+        self.dl_sv_movie.visible = True
+        pts = self._sv_frames["n_points"]
+        self.sv_info.object = (f"{n} frames; points on a plane: median {int(np.median(pts))}, fewest {int(pts.min())}."
+                               + (" Few points per plane: increase the half thickness." if np.median(pts) < 20 else ""))
+        self._sv_show_frame()
+        self._say(f"Computed {n} co-moving frames; move the slider to walk along the filament.", "success")
+
+    def _sv_show_frame(self):
+        from examm import streamviz as sv
+
+        if self._sv_frames is None:
+            return
+        self._fig(self.fig_sv_frame, sv.plot_comoving_frame(self._sv_frames, int(self.w_sv_frame.value), self.X))
+
+    def _dl_frames_movie(self):
+        from examm import streamviz as sv
+
+        if self._sv_frames is None:
+            raise ValueError("compute the co-moving frames first")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = sv.animate_comoving_frames(self._sv_frames, Path(tmp) / "frames.mp4", self.X)
+            self.dl_sv_movie.filename = "comoving_frames" + out.suffix
+            return io.BytesIO(out.read_bytes())
 
     # ------------------------------------------------------------------ 3-D view
     def _view(self):

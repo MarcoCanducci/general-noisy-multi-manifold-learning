@@ -122,3 +122,23 @@ def test_laat_mbms_thinned_index_and_viewer_export():
     assert [(m.dim, m.graph.n_nodes) for m in ns["learner"].manifolds_] == [(m.dim, m.graph.n_nodes) for m in L.manifolds_]
     html = a._dl_viewer().getvalue().decode()
     assert html.startswith("<!doctype html>") and "Topology (all structures)" in html and "GUI session" in html
+
+
+def test_filament_views_in_the_explore_step(app):
+    a = app
+    k = next(i for i, m in enumerate(a.learner.manifolds_) if m.dim == 1 and m.agtm is not None)
+    a.w_manifold.value = k
+    a._explore()
+    assert a.sv_box.visible and a.w_sv_vals.value
+    a._sv_profile()
+    assert a.fig_sv_prof.object is not None
+    a.w_sv_up.value = 1
+    a._sv_compute_frames()
+    assert a.w_sv_frame.visible and a.w_sv_frame.end == len(a._sv_frames["centers"]) - 1 and a.fig_sv_frame.object is not None
+    a.w_sv_frame.value = 0
+    a._sv_show_frame()
+    a.w_manifold.value = -1
+    a._explore()
+    assert not a.sv_box.visible and a._sv_frames is None
+    a._guard(a._sv_profile)
+    assert a.alert.alert_type == "danger"

@@ -279,6 +279,8 @@ The steps expose the same choices as the library:
   diffusion (SAF or MBMS) are chosen separately, so the default pair and the 1-DREAM pair can be mixed.
 - **Dimensionality**: smoothing width, estimating the index on a thinned copy of the data
   (`index_preprocess`), and the inverse-density weighting (`index_density_weight`).
+- **Explore**: for a 1-D manifold, the two 1-DREAM views (`examm.streamviz`): the bi-dimensional profile,
+  and the co-moving frames with a slider to walk along the filament and a movie download.
 
 Because it runs in the browser it needs no X server under WSL, and it can be used on a remote
 machine through an SSH port forward (`ssh -L 5006:localhost:5006 host`, then `examm-gui
