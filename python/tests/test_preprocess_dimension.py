@@ -192,3 +192,22 @@ def test_laat_and_mbms_drive_the_pipeline():
     assert [n for n, _ in m.preprocess_.info["steps"]] == ["LAAT", "MBMS"]
     big = max(m.manifolds_, key=lambda q: q.n_points)
     assert big.dim == 1 and big.n_points > 900
+
+
+def test_density_weight_keeps_a_dense_body_from_relabelling_an_attached_sheet():
+    import examm
+
+    rng = np.random.default_rng(0)
+    r, R, n_sheet = 0.3, 0.6, 1500
+    per_disc = n_sheet / 6.0 * np.pi * r ** 2
+    n_ball = int(10 * per_disc / r ** 3 * R ** 3)                    # ten times denser than the sheet at scale r
+    u = rng.normal(size=(n_ball, 3))
+    ball = R * u / np.linalg.norm(u, axis=1, keepdims=True) * rng.uniform(0, 1, (n_ball, 1)) ** (1 / 3)
+    sheet = np.c_[rng.uniform(R - 0.3, R + 2.7, n_sheet), rng.uniform(-1, 1, n_sheet), rng.normal(0, 0.01, n_sheet)]
+    X = np.r_[ball, sheet]
+    near = (sheet[:, 0] > R + 0.15 * r) & (sheet[:, 0] < R + 0.5 * r) & (np.abs(sheet[:, 1]) < 0.6)   # sheet just outside the ball
+    plain = examm.dimensionality_index(X, r).index[n_ball:]
+    fair = examm.dimensionality_index(X, r, density_weight=True).index[n_ball:]
+    assert (fair[near] == 2).mean() > 0.9 > (plain[near] == 2).mean() + 0.2
+    far = sheet[:, 0] > R + 2 * r
+    assert (fair[far] == 2).mean() > 0.95 and (plain[far] == 2).mean() > 0.95

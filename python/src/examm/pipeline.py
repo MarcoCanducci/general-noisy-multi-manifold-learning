@@ -21,7 +21,7 @@ STAGES = ("preprocess", "dimension", "graphs", "agtm")
 # which stage each parameter first affects
 _PARAM_STAGE = {
     "r": 0, "preprocess": 0,
-    "smooth_factor": 1, "dim_min_points": 1, "index_preprocess": 1,
+    "smooth_factor": 1, "dim_min_points": 1, "index_preprocess": 1, "index_density_weight": 1,
     "dims": 2, "graph": 2, "eta": 2, "beta": 2, "min_points": 2, "min_nodes": 2, "min_residual": 2,
     "angle_threshold": 2, "attach": 2,
     "epsilon": 3, "agtm_params": 3, "background": 3,
@@ -111,7 +111,8 @@ class MultiManifoldLearner:
 
     def __init__(self, r: float, *, preprocess="saf", dims=None, graph: str = "crawl", eta: float = 0.75,
                  beta: float = 0.4, epsilon: int = 1, smooth_factor: float = 1.0,
-                 dim_min_points: int | None = None, index_preprocess=None, min_points: int = 5, min_nodes: int | None = None,
+                 dim_min_points: int | None = None, index_preprocess=None, index_density_weight: bool = False,
+                 min_points: int = 5, min_nodes: int | None = None,
                  min_residual: int = 20, angle_threshold: float = 2.0 / 3.0, attach: str = "same_dim",
                  background: float = 0.0, agtm_params: dict | None = None, random_state=None,
                  n_jobs: int | None = None, verbose: bool = False):
@@ -125,6 +126,7 @@ class MultiManifoldLearner:
         self.smooth_factor = smooth_factor
         self.dim_min_points = dim_min_points
         self.index_preprocess = index_preprocess
+        self.index_density_weight = index_density_weight
         self.min_points = min_points
         self.min_nodes = min_nodes
         self.min_residual = min_residual
@@ -186,7 +188,8 @@ class MultiManifoldLearner:
         if self.index_preprocess is None:
             self.dim_result_ = dimensionality_index(self.preprocess_.diffused, float(self.r),
                                                     smooth_factor=self.smooth_factor,
-                                                    min_points=self.dim_min_points)
+                                                    min_points=self.dim_min_points,
+                                                    density_weight=bool(self.index_density_weight))
         else:
             # estimate the index on a separately preprocessed (typically density-thinned) subset,
             # where dense regions cannot outvote the rest, and carry it to every modelled point
@@ -198,7 +201,8 @@ class MultiManifoldLearner:
             if len(sub) == 0:
                 raise ValueError("index_preprocess removed every point")
             res = dimensionality_index(sub.diffused, float(self.r), smooth_factor=self.smooth_factor,
-                                       min_points=self.dim_min_points)
+                                       min_points=self.dim_min_points,
+                                       density_weight=bool(self.index_density_weight))
             _, nn = cKDTree(sub.noisy).query(self.preprocess_.noisy)
             self.dim_result_ = type(res)(**{f.name: (None if getattr(res, f.name) is None else getattr(res, f.name)[nn])
                                             for f in fields(res)})
