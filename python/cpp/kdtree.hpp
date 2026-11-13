@@ -1,5 +1,5 @@
 // Minimal static KD-tree for double precision points in any dimension.
-// Part of examm (AGPL-3.0-or-later).
+// Part of manydream (AGPL-3.0-or-later).
 #pragma once
 #include <algorithm>
 #include <cstdint>
@@ -7,7 +7,7 @@
 #include <numeric>
 #include <vector>
 
-namespace examm {
+namespace manydream {
 
 class KDTree {
 public:
@@ -124,4 +124,4 @@ private:
     }
 };
 
-} // namespace examm
+} // namespace manydream

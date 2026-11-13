@@ -3,8 +3,8 @@ import warnings
 import numpy as np
 import pytest
 
-import examm
-from examm import MultiManifoldLearner, datasets
+import manydream
+from manydream import MultiManifoldLearner, datasets
 
 
 @pytest.fixture(scope="module")
@@ -55,7 +55,7 @@ def test_refit_recomputes_only_stale_stages(toroids):
     assert L.preprocess_ is pre and L.dim_result_ is dim and L.graphs_ is not graphs
     assert len(L.manifolds_) == 3
     L.set_params(r=0.11)
-    assert L.stale_stages == examm.STAGES
+    assert L.stale_stages == manydream.STAGES
     L.set_params(r=0.1)
     with pytest.raises(ValueError):
         L.set_params(nonsense=1)
@@ -68,8 +68,8 @@ def test_save_load_roundtrip(toroids, tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         L.run()
-    examm.io.save(L, tmp_path / "model.examm")
-    L2 = examm.io.load(tmp_path / "model.examm")
+    manydream.io.save(L, tmp_path / "model.manydream")
+    L2 = manydream.io.load(tmp_path / "model.manydream")
     assert np.allclose(L2.score_samples(ds.X[:500]), L.score_samples(ds.X[:500]))
     assert len(L2.manifolds_) == len(L.manifolds_)
 
@@ -80,10 +80,10 @@ def test_load_table_formats(tmp_path, rng):
     np.savetxt(tmp_path / "b.txt", A)
     np.save(tmp_path / "c.npy", A)
     np.savez(tmp_path / "d.npz", data=A)
-    B, names = examm.io.load_table(tmp_path / "a.csv")
+    B, names = manydream.io.load_table(tmp_path / "a.csv")
     assert np.allclose(A, B) and names == ["x", "y", "z", "rho"]
     for f in ("b.txt", "c.npy", "d.npz"):
-        B, names = examm.io.load_table(tmp_path / f)
+        B, names = manydream.io.load_table(tmp_path / f)
         assert np.allclose(A, B) and names == ["x1", "x2", "x3", "x4"]
 
 
@@ -131,12 +131,12 @@ def test_d1_recovers_manifolds_of_mixed_dimension():
 
 
 def test_index_can_be_estimated_on_a_thinned_subset():
-    import examm
+    import manydream
 
     rng = np.random.default_rng(3)
     X = np.c_[rng.uniform(0, 3, (3000, 2)), rng.normal(0, 0.01, 3000)]
-    thin = examm.Pipeline([examm.DensityThin(radius=0.2, target=15, random_state=0), examm.SAF(), examm.DensityFilter()])
-    L = examm.MultiManifoldLearner(r=0.3, dims=[1, 2], index_preprocess=thin, random_state=0).set_data(X).run("graphs")
+    thin = manydream.Pipeline([manydream.DensityThin(radius=0.2, target=15, random_state=0), manydream.SAF(), manydream.DensityFilter()])
+    L = manydream.MultiManifoldLearner(r=0.3, dims=[1, 2], index_preprocess=thin, random_state=0).set_data(X).run("graphs")
     src = L.index_source_
     assert len(src["preprocess"]) < len(L.preprocess_) == len(L.dim_result_.index)
     assert np.array_equal(L.dim_result_.index, src["result"].index[src["nearest"]])

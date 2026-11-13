@@ -1,6 +1,6 @@
 """Standalone interactive viewer (one HTML file) for one or several fitted hierarchies.
 
-    examm.viewer.export_viewer("viewer.html", X, {"run A": H_a, "run B": H_b}, names=feature_names)
+    manydream.viewer.export_viewer("viewer.html", X, {"run A": H_a, "run B": H_b}, names=feature_names)
 
 The page needs no server: open it in a browser. It shows the points in 3-D (rotate, zoom, pick
 the three features), the graphs of the structures, a tree to switch structures, parents or leaves
@@ -521,7 +521,7 @@ def viewer_payload(X, versions: dict, names=None, hops: int = 2, min_region: int
             "versions": [{"name": str(name), **_version_payload(H, X, hops, min_region)} for name, H in versions.items()]}
 
 
-def export_viewer(path, X, versions, names=None, title: str = "examm viewer", plotlyjs: str = "inline",
+def export_viewer(path, X, versions, names=None, title: str = "MANY-DREAM viewer", plotlyjs: str = "inline",
                   hops: int = 2, min_region: int = 30, extra=None) -> Path:
     """Write the standalone viewer page.
 
@@ -529,7 +529,7 @@ def export_viewer(path, X, versions, names=None, title: str = "examm viewer", pl
     ----------
     path : file to write (``.html``)
     X : (n, d) data
-    versions : dict name -> fitted :class:`examm.HierarchicalAGTM` (or a single hierarchy)
+    versions : dict name -> fitted :class:`manydream.HierarchicalAGTM` (or a single hierarchy)
     names : feature names
     plotlyjs : ``"inline"`` embeds plotly.js in the page (works offline, about 5 MB);
         ``"cdn"`` loads it from the plotly CDN.
@@ -977,7 +977,7 @@ function orthonormal(A){ // keep accumulated rotations rigid
   const det=A[0]*(A[4]*A[8]-A[5]*A[7])-A[1]*(A[3]*A[8]-A[5]*A[6])+A[2]*(A[3]*A[7]-A[4]*A[6]); if(det<0) z=[-z[0],-z[1],-z[2]];
   return [x[0],y[0],z[0],x[1],y[1],z[1],x[2],y[2],z[2]]; }
 const TV={scale:1,tx:0,ty:0,R:I3(),fitted:""}; let topoHover=-1, topoDrag=null, topoCache=null, topoRAF=0;
-function topoKey(){ return "examm-topo3|"+document.title+"|"+V[cur].name+"|"+$("tmode").value; }
+function topoKey(){ return "manydream-topo3|"+document.title+"|"+V[cur].name+"|"+$("tmode").value; }
 function topoSave(){ try{ localStorage.setItem(topoKey(), JSON.stringify({isl:V[cur].topo.isl.map(t=>[t.d,t.R]), view:TV.R})); }catch(e){} }
 function topoLoad(){ const T=V[cur].topo; if(!T) return; let a=null; try{ a=JSON.parse(localStorage.getItem(topoKey())||"null"); }catch(e){}
   const ok=a && a.isl && a.isl.length===T.isl.length; T.isl.forEach((t,k)=>{ t.d = ok ? a.isl[k][0].slice() : [0,0,0]; t.R = ok ? a.isl[k][1].slice() : I3(); }); TV.R = ok && a.view ? a.view.slice() : rotXY(-0.35,0.45); }

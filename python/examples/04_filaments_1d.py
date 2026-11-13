@@ -1,9 +1,9 @@
 """One-dimensional manifolds (filaments), the 1-DREAM use case."""
-import examm
-from examm import datasets, viz
+import manydream
+from manydream import datasets, viz
 
 ds = datasets.make_filaments(random_state=0)
-learner = examm.MultiManifoldLearner(r=0.1, dims=[1], random_state=0).fit(ds.X)
+learner = manydream.MultiManifoldLearner(r=0.1, dims=[1], random_state=0).fit(ds.X)
 print(learner.summary())
 for row in viz.filament_table(learner):
     print(row)

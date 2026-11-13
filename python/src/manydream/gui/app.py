@@ -11,10 +11,10 @@ from pathlib import Path
 
 import numpy as np
 
-import examm
-from examm import datasets, viz
-from examm.gui.scene import Scene, pyvista_available, render
-from examm.preprocess import LAAT, MBMS, SAF, DensityFilter, DensityThin, Pipeline
+import manydream
+from manydream import datasets, viz
+from manydream.gui.scene import Scene, pyvista_available, render
+from manydream.preprocess import LAAT, MBMS, SAF, DensityFilter, DensityThin, Pipeline
 
 STEPS = ["Data", "Features", "Preprocess", "Dimensionality", "Graphs", "AGTM", "Explore & export"]
 STAGE_OF_STEP = {2: "preprocess", 3: "dimension", 4: "graphs", 5: "agtm"}
@@ -33,7 +33,7 @@ LAYERS = ["Raw data", "Kept points (noisy)", "Diffused points", "Dimensionality 
 def suggest_radius(X, target: int = 30, sample: int = 2000, seed: int = 0) -> float:
     """Radius for which a typical point has about ``target`` neighbours."""
     X = np.ascontiguousarray(X, float)
-    tree = examm._core.KDTree(X)
+    tree = manydream._core.KDTree(X)
     Q = X[np.random.default_rng(seed).choice(len(X), min(sample, len(X)), replace=False)]
     lo, hi = 0.0, float(np.linalg.norm(X.max(0) - X.min(0)))
     for _ in range(40):
@@ -63,7 +63,7 @@ class App:
         self.max_display = max_display
         self.table = None
         self.columns: list[str] = []
-        self.learner: examm.MultiManifoldLearner | None = None
+        self.learner: manydream.MultiManifoldLearner | None = None
         self.X = None
         self.scaling = None
         self.source = ""
@@ -229,15 +229,15 @@ class App:
         self.w_manifold = W.Select(name="Manifold", options={"All": -1}, value=-1)
         self.w_quantity = W.Select(name="Quantity", options=["curvature"], value="curvature")
         self.fig_explore = pn.pane.Matplotlib(None, tight=True, dpi=90, sizing_mode="stretch_width")
-        self.dl_model = W.FileDownload(callback=self._dl_model, filename="examm_model.pkl", label="Download fitted model",
+        self.dl_model = W.FileDownload(callback=self._dl_model, filename="manydream_model.pkl", label="Download fitted model",
                                        button_type="default")
-        self.dl_script = W.FileDownload(callback=self._dl_script, filename="examm_session.py",
+        self.dl_script = W.FileDownload(callback=self._dl_script, filename="manydream_session.py",
                                         label="Download Python script", button_type="default")
-        self.dl_labels = W.FileDownload(callback=self._dl_labels, filename="examm_labels.csv",
+        self.dl_labels = W.FileDownload(callback=self._dl_labels, filename="manydream_labels.csv",
                                         label="Download per-point results (CSV)", button_type="default")
-        self.dl_summary = W.FileDownload(callback=self._dl_summary, filename="examm_summary.png",
+        self.dl_summary = W.FileDownload(callback=self._dl_summary, filename="manydream_summary.png",
                                          label="Download summary figure", button_type="default")
-        self.dl_viewer = W.FileDownload(callback=self._dl_viewer, filename="examm_viewer.html",
+        self.dl_viewer = W.FileDownload(callback=self._dl_viewer, filename="manydream_viewer.html",
                                         label="Download interactive viewer (HTML)", button_type="primary")
         self.w_manifold.param.watch(lambda e: self._guard(self._explore), "value")
         self.w_quantity.param.watch(lambda e: self._guard(self._explore), "value")
@@ -299,7 +299,7 @@ class App:
         right = pn.Column(pn.Row(pn.pane.Markdown("**Layers**"), self.w_layers), self.cam_row, self.view_holder,
                           self.backend_note, self.summary, sizing_mode="stretch_width")
         self.root = pn.Column(
-            pn.Row(pn.pane.Markdown("## examm — noisy multi-manifold learning"), pn.Spacer(), self.spinner),
+            pn.Row(pn.pane.Markdown("## MANY-DREAM — noisy multi-manifold learning"), pn.Spacer(), self.spinner),
             self.status, self.alert, pn.Row(self.tabs, right, sizing_mode="stretch_width"),
             sizing_mode="stretch_width")
         self._update_status()
@@ -319,7 +319,7 @@ class App:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 out = fn(*a)
-            notes = [str(w.message) for w in caught if issubclass(w.category, examm.DegenerateModelWarning)]
+            notes = [str(w.message) for w in caught if issubclass(w.category, manydream.DegenerateModelWarning)]
             if notes and self.alert.alert_type != "danger":
                 self._say(self.alert.object + "<br>Note: " + " | ".join(dict.fromkeys(notes)), "warning")
             return out
@@ -385,7 +385,7 @@ class App:
         path = Path(self.w_path.value.strip()).expanduser()
         if not path.is_file():
             raise FileNotFoundError(f"no such file: {path}")
-        A, names = examm.io.load_table(path)
+        A, names = manydream.io.load_table(path)
         self._set_table(A, names, path.name)
 
     def _load_upload(self):
@@ -395,7 +395,7 @@ class App:
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
             fh.write(self.w_upload.value)
         try:
-            A, names = examm.io.load_table(fh.name)
+            A, names = manydream.io.load_table(fh.name)
         finally:
             Path(fh.name).unlink(missing_ok=True)
         self._set_table(A, names, self.w_upload.filename or "upload")
@@ -419,7 +419,7 @@ class App:
         self.feature_names = feats
         if r is None:
             r = suggest_radius(self.X)
-        self.learner = examm.MultiManifoldLearner(r=r, random_state=0).set_data(self.X)
+        self.learner = manydream.MultiManifoldLearner(r=r, random_state=0).set_data(self.X)
         self._r_silent = True
         self.w_r.value = r
         self.w_r.step = float(f"{r / 10:.1g}")
@@ -653,7 +653,7 @@ class App:
         return L.manifolds_[k], {c: self.table[:, self.columns.index(c)] for c in self.w_sv_vals.value}
 
     def _sv_profile(self):
-        from examm import streamviz as sv
+        from manydream import streamviz as sv
 
         m, vals = self._sv_target()
         res = sv.bidimensional_profile(m, self.X, vals, r_max=float(self.w_sv_rmax.value), n_radial=int(self.w_sv_nrad.value))
@@ -661,7 +661,7 @@ class App:
         self._say("Bi-dimensional profile: position along the filament against distance from its core.", "success")
 
     def _sv_compute_frames(self):
-        from examm import streamviz as sv
+        from manydream import streamviz as sv
 
         m, vals = self._sv_target()
         self._sv_frames = sv.comoving_frames(m, self.X, vals, side=float(self.w_sv_side.value), upsample=int(self.w_sv_up.value),
@@ -676,14 +676,14 @@ class App:
         self._say(f"Computed {n} co-moving frames; move the slider to walk along the filament.", "success")
 
     def _sv_show_frame(self):
-        from examm import streamviz as sv
+        from manydream import streamviz as sv
 
         if self._sv_frames is None:
             return
         self._fig(self.fig_sv_frame, sv.plot_comoving_frame(self._sv_frames, int(self.w_sv_frame.value), self.X))
 
     def _dl_frames_movie(self):
-        from examm import streamviz as sv
+        from manydream import streamviz as sv
 
         if self._sv_frames is None:
             raise ValueError("compute the co-moving frames first")
@@ -787,8 +787,8 @@ class App:
 
     def _dl_viewer(self):
         """Standalone HTML viewer of the session: one global model built on the graphs that were found."""
-        from examm.hierarchy import HierarchicalAGTM
-        from examm.viewer import export_viewer
+        from manydream.hierarchy import HierarchicalAGTM
+        from manydream.viewer import export_viewer
 
         L = self._need_fit()
         graphs = [g for gs in L.graphs_.values() for g in gs]
@@ -803,7 +803,7 @@ class App:
         extra = {c: self.table[:, k] for k, c in enumerate(self.columns) if c not in self.feature_names}
         with tempfile.TemporaryDirectory() as tmp:
             out = export_viewer(Path(tmp) / "viewer.html", self.X, {"GUI session": H}, names=self.feature_names,
-                                title="examm viewer", extra=extra)
+                                title="MANY-DREAM viewer", extra=extra)
             return io.BytesIO(out.read_bytes())
 
     def _dl_summary(self):
@@ -828,19 +828,19 @@ class App:
                   "Mixed manifolds D1 (3-D)": "make_d1(random_state=0)",
                   "Three filaments (3-D)": "make_filaments(random_state=0)",
                   "3-torus (4-D)": "make_torus3(random_state=0)"}[self.source]
-            load = f"table = examm.datasets.{fn}.X\ncolumns = {self.columns!r}"
+            load = f"table = manydream.datasets.{fn}.X\ncolumns = {self.columns!r}"
         else:
-            load = f"table, columns = examm.io.load_table({self.source!r})  # adjust the path"
+            load = f"table, columns = manydream.io.load_table({self.source!r})  # adjust the path"
         lines = [
-            "# Generated by examm-gui: reproduces the session.", "import numpy as np", "import examm",
-            "from examm.preprocess import LAAT, MBMS, SAF, DensityFilter, DensityThin, Pipeline", "", load,
+            "# Generated by manydream-gui: reproduces the session.", "import numpy as np", "import manydream",
+            "from manydream.preprocess import LAAT, MBMS, SAF, DensityFilter, DensityThin, Pipeline", "", load,
             f"features = {feats!r}", "X = table[:, [columns.index(f) for f in features]]",
         ]
         if self.w_standardise.value:
             lines.append("X = (X - X.mean(0)) / X.std(0)")
         lines += [
             "", f"preprocess = {pre}", f"index_preprocess = {idx}      # where the dimensionality index is estimated", "",
-            "learner = examm.MultiManifoldLearner(",
+            "learner = manydream.MultiManifoldLearner(",
             f"    r={p['r']!r}, preprocess=preprocess, smooth_factor={p['smooth_factor']!r},",
             f"    index_preprocess=index_preprocess, index_density_weight={p['index_density_weight']!r},",
             f"    graph={p['graph']!r}, dims={p['dims']!r}, eta={p['eta']!r}, beta={p['beta']!r}, "
@@ -849,7 +849,7 @@ class App:
             f"    agtm_params={p['agtm_params']!r},".replace("inf", "np.inf"),
             "    random_state=0,", ").fit(X)", "", "print(learner.summary())",
             "# learner.manifolds_, learner.dim_index_, learner.labels_, learner.score_samples(X) ...",
-            "# import examm.viz as viz; viz.plot_summary(learner).savefig('summary.png', dpi=150)", "",
+            "# import manydream.viz as viz; viz.plot_summary(learner).savefig('summary.png', dpi=150)", "",
         ]
         return "\n".join(lines)
 
@@ -868,7 +868,7 @@ def create_app(path: str | None = None, backend: str = "plotly", max_display: in
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="examm-gui", description="Step-by-step GUI for examm (opens in the browser).")
+    parser = argparse.ArgumentParser(prog="manydream-gui", description="Step-by-step GUI for MANY-DREAM (opens in the browser).")
     parser.add_argument("file", nargs="?", help="table to load at start (csv, txt, npy, npz, h5, fits)")
     parser.add_argument("--port", type=int, default=5006)
     parser.add_argument("--address", default="localhost", help="address to listen on (default: localhost only)")
@@ -881,14 +881,14 @@ def main(argv=None):
     try:
         import panel as pn
     except ImportError as exc:  # pragma: no cover
-        raise SystemExit("The GUI needs extra packages: pip install 'examm[gui]'") from exc
+        raise SystemExit("The GUI needs extra packages: pip install 'manydream[gui]'") from exc
     if args.backend == "pyvista" and not pyvista_available():
         raise SystemExit("PyVista cannot render off-screen on this machine; install an OpenGL library "
                          "(e.g. sudo apt install libosmesa6) or use the default --backend plotly")
     pn.extension("plotly")
-    print(f"examm-gui: http://{args.address}:{args.port}  (Ctrl+C to stop)")
+    print(f"manydream-gui: http://{args.address}:{args.port}  (Ctrl+C to stop)")
     pn.serve(lambda: create_app(args.file, args.backend, args.max_display), port=args.port, address=args.address,
-             show=not args.no_browser, title="examm", websocket_origin="*" if args.address != "localhost" else None,
+             show=not args.no_browser, title="MANY-DREAM", websocket_origin="*" if args.address != "localhost" else None,
              threaded=False)
 
 

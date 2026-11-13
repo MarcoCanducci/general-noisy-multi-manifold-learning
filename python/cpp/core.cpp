@@ -1,5 +1,5 @@
-// examm._core: compiled kernels for the multi-manifold pipeline.
-// Part of examm (AGPL-3.0-or-later).
+// manydream._core: compiled kernels for the multi-manifold pipeline.
+// Part of manydream (AGPL-3.0-or-later).
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -20,7 +20,7 @@
 #include "linalg.hpp"
 
 namespace py = pybind11;
-using examm::KDTree;
+using manydream::KDTree;
 
 using DArr = py::array_t<double, py::array::c_style | py::array::forcecast>;
 using IArr = py::array_t<int64_t, py::array::c_style | py::array::forcecast>;
@@ -195,8 +195,8 @@ struct Tree {
         t.radius(q, r2, [&](int64_t j, double) { nb.push_back(j); });
         if (count) *count = nb.size();
         if (nb.size() < std::max<size_t>(min_pts, 2)) return false;
-        examm::covariance([&](size_t i) { return row(nb[i]); }, nb.size(), d, mean, cov);
-        examm::sym_eig(cov, d, evals, n_vec > 0 ? evecs_full : nullptr);
+        manydream::covariance([&](size_t i) { return row(nb[i]); }, nb.size(), d, mean, cov);
+        manydream::sym_eig(cov, d, evals, n_vec > 0 ? evecs_full : nullptr);
         return true;
     }
 
@@ -395,7 +395,7 @@ struct Tree {
                 for (int k = 0; k < j; ++k) s += B[a * j + k] * B[b * j + k];
                 S[a * j + b] = s;
             }
-        examm::sym_eig(S.data(), j, ev.data(), V.data());
+        manydream::sym_eig(S.data(), j, ev.data(), V.data());
         if (ev[j - 1] < 1e-8) { // degenerate projection: fall back to the PCA frame
             std::copy(G, G + j * d, U);
             return;
@@ -735,7 +735,7 @@ py::array_t<double> agtm_resp(DArr T, DArr means, DArr Wh, DArr logc) {
 } // namespace
 
 PYBIND11_MODULE(_core, m) {
-    m.doc() = "Compiled kernels of examm";
+    m.doc() = "Compiled kernels of manydream";
     m.def("set_num_threads", [](int n) { g_threads = n > 0 ? n : 0; },
           "Number of OpenMP threads used by the kernels (0 = all available).");
     m.def("get_num_threads", [] { return n_threads(); });

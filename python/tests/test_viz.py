@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-import examm  # noqa: E402
-from examm import datasets, viz  # noqa: E402
+import manydream  # noqa: E402
+from manydream import datasets, viz  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -18,7 +18,7 @@ def fitted():
     X = np.vstack([ds.X, extra])
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        L = examm.MultiManifoldLearner(r=0.1, random_state=0, agtm_params={"max_iter": 10}).fit(X)
+        L = manydream.MultiManifoldLearner(r=0.1, random_state=0, agtm_params={"max_iter": 10}).fit(X)
     return X, L
 
 
@@ -72,6 +72,6 @@ def test_chain_order_follows_the_filament():
     perm = np.random.default_rng(0).permutation(12)
     nodes = np.c_[t, t**2][perm]
     inv = np.argsort(perm)
-    g = examm.ManifoldGraph(nodes, [[inv[i], inv[i + 1]] for i in range(11)], 1)
+    g = manydream.ManifoldGraph(nodes, [[inv[i], inv[i + 1]] for i in range(11)], 1)
     order, s = viz.chain_order(g)
     assert np.allclose(np.abs(np.diff(nodes[order][:, 0])), t[1] - t[0]) and np.all(np.diff(s) > 0)

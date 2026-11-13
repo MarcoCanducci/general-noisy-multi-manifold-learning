@@ -3,10 +3,10 @@ import warnings
 import numpy as np
 import pytest
 
-import examm
-from examm import AGTM, DegenerateModelError, DegenerateModelWarning, ManifoldGraph, MultiManifoldModel, datasets
-from examm.agtm import epsilon_net
-from examm.crawling import crawl
+import manydream
+from manydream import AGTM, DegenerateModelError, DegenerateModelWarning, ManifoldGraph, MultiManifoldModel, datasets
+from manydream.agtm import epsilon_net
+from manydream.crawling import crawl
 
 
 def noisy_circle(rng, R=1.0, n=4000, noise=0.03, d=2):

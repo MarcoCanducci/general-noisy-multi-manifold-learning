@@ -68,7 +68,7 @@ class MultiManifoldLearner:
     preprocess : str, Preprocessor, list or None
         Denoising / diffusion stage. ``"saf"`` (default) runs SAF diffusion followed by the
         density filter; ``None`` uses the data as they are; any object implementing
-        :class:`examm.preprocess.Preprocessor` (or a list of them) can be given.
+        :class:`manydream.preprocess.Preprocessor` (or a list of them) can be given.
     dims : iterable of int, optional
         Intrinsic dimensions to extract. Default ``1 .. d-1``.
     graph : {"crawl", "epsilon"}
@@ -91,7 +91,7 @@ class MultiManifoldLearner:
     background : float
         Weight of a uniform background component in the combined model (0 = none).
     agtm_params : dict, optional
-        Extra keyword arguments for :class:`examm.AGTM`.
+        Extra keyword arguments for :class:`manydream.AGTM`.
     random_state : int or Generator, optional
     n_jobs : int, optional
         Threads for the compiled kernels (default: all cores).
@@ -160,7 +160,7 @@ class MultiManifoldLearner:
 
     def _log(self, msg):
         if self.verbose:
-            print(f"[examm] {msg}", flush=True)
+            print(f"[manydream] {msg}", flush=True)
 
     def _validate(self):
         check_radius(self.r)

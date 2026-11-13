@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-import examm
-from examm import streamviz as sv
+import manydream
+from manydream import streamviz as sv
 
 
 @pytest.fixture(scope="module")
@@ -13,8 +13,8 @@ def stream():
     core = np.c_[3 * t, np.sin(2 * t), 0.5 * t ** 2]
     X = core + rng.normal(0, 0.1, (n, 3))
     values = {"radial": np.linalg.norm(X - core, axis=1), "along": t}
-    g = examm.crawl(core, 0.3, 1, seed=int(np.argmin(np.abs(t - 0.5))))
-    model = examm.AGTM(g).fit(X)
+    g = manydream.crawl(core, 0.3, 1, seed=int(np.argmin(np.abs(t - 0.5))))
+    model = manydream.AGTM(g).fit(X)
     return X, values, model
 
 
@@ -65,6 +65,6 @@ def test_comoving_frames_carry_a_consistent_orthonormal_plane(stream, tmp_path):
 
 def test_views_reject_manifolds_that_are_not_curves(rng):
     X = np.c_[rng.uniform(0, 2, (800, 2)), rng.normal(0, 0.01, 800)]
-    m = examm.AGTM(examm.crawl(X, 0.3, 2, seed=0)).fit(X)
+    m = manydream.AGTM(manydream.crawl(X, 0.3, 2, seed=0)).fit(X)
     with pytest.raises(ValueError):
         sv.bidimensional_profile(m, X, r_max=0.2)

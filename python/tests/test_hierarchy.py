@@ -3,9 +3,9 @@ import warnings
 import numpy as np
 import pytest
 
-import examm
-from examm import AGTM, HierarchicalAGTM, ManifoldGraph, build_hierarchy, datasets
-from examm.crawling import crawl
+import manydream
+from manydream import AGTM, HierarchicalAGTM, ManifoldGraph, build_hierarchy, datasets
+from manydream.crawling import crawl
 
 
 def two_circles(rng, n_out=150):

@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import examm
+import manydream
 
 MAT = Path(__file__).resolve().parents[2] / "3ToroidsNoisy_BestModel.mat"
 
@@ -22,7 +22,7 @@ def test_agreement_with_matlab_results_on_three_toroids():
     X, kept_m, idx_m = np.ascontiguousarray(m["DNN"][:, :3]), m["Labels"].ravel() == 1, m["Idx"].ravel()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        L = examm.MultiManifoldLearner(r=0.2, random_state=0, agtm_params={"max_iter": 10}).fit(X)
+        L = manydream.MultiManifoldLearner(r=0.2, random_state=0, agtm_params={"max_iter": 10}).fit(X)
     kept = np.zeros(len(X), bool)
     kept[L.preprocess_.indices] = True
     assert (kept == kept_m).mean() > 0.95                       # density filter

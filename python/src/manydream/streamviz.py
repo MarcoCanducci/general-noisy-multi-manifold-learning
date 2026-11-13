@@ -9,7 +9,7 @@ noisy environments* (2022), section 4.
   consistent pair of axes, is moved along a finely sampled spine; on every plane the quantities
   and the density of the fitted model are mapped on a square grid. The frames form a movie.
 
-Both use the fitted 1-D :class:`examm.AGTM` (the stream GTM): its trained mapping gives the spine
+Both use the fitted 1-D :class:`manydream.AGTM` (the stream GTM): its trained mapping gives the spine
 and its tangents. Means are Gaussian-weighted (sec. 4.3); the SPH weights of the paper are not
 implemented. The functions work in any ambient dimension, with the axes of the paper in 3-D.
 """

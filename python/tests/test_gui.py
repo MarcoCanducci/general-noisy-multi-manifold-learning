@@ -6,8 +6,8 @@ import pytest
 pn = pytest.importorskip("panel")
 pytest.importorskip("plotly")
 
-from examm.gui.app import App, suggest_radius  # noqa: E402
-from examm.gui.scene import Scene, render  # noqa: E402
+from manydream.gui.app import App, suggest_radius  # noqa: E402
+from manydream.gui.scene import Scene, render  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -89,8 +89,8 @@ def test_errors_are_reported_in_the_page(app, tmp_path):
 def test_scene_and_radius_helpers(rng):
     X = rng.uniform(size=(5000, 3))
     r = suggest_radius(X)
-    import examm
-    assert 20 <= np.median(examm._core.KDTree(X).radius_count(X[:500], r)) <= 45
+    import manydream
+    assert 20 <= np.median(manydream._core.KDTree(X).radius_count(X[:500], r)) <= 45
     sc = Scene().points("p", X[:100]).points("q", X[:50, :2], np.zeros((50, 3), np.uint8)).lines(
         "l", X[:10], [[0, 1], [1, 2]]).sphere("s", X[0], 0.1)
     assert [l[0] for l in sc.layers] == ["points", "points", "lines", "lines"]
