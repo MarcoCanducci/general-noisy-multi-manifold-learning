@@ -1,0 +1,98 @@
+import warnings
+
+import numpy as np
+import pytest
+
+pn = pytest.importorskip("panel")
+pytest.importorskip("plotly")
+
+from examm.gui.app import App, suggest_radius  # noqa: E402
+from examm.gui.scene import Scene, render  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def app():
+    pn.extension("plotly")
+    a = App()
+    a.w_example.value = "Three filaments (3-D)"
+    a._load_example()
+    return a
+
+
+def test_walk_through_all_steps(app):
+    a = app
+    assert a._done() == 2 and a.learner.stale_stages == ("preprocess", "dimension", "graphs", "agtm")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for step in (2, 3, 4, 5):
+            a._run_step_impl(step)
+            assert a._done() == step + 1 and a.alert.alert_type in ("success", "warning")
+    assert len(a.learner.manifolds_) >= 3
+    a.w_layers.value = ["Raw data", "Kept points (noisy)", "Diffused points", "Dimensionality index", "Graphs",
+                        "Attached points", "AGTM (fitted graph)", "Scale r"]
+    a.w_manifold.value = 0
+    a.w_quantity.value = "x3"
+    a._explore()
+    assert a.fig_explore.object is not None
+    a.w_pca.value = True
+    a.refresh_view()
+
+
+def test_changing_a_parameter_marks_later_steps_stale(app):
+    a = app
+    a.w_beta.value = 0.3
+    a._sync_params()
+    assert a.learner.stale_stages == ("graphs", "agtm") and a._done() == 4
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a._run_step_impl(5)
+    assert a.learner.stale_stages == ()
+
+
+def test_exports_and_generated_script_reproduce_the_session(app, tmp_path):
+    a = app
+    assert len(a._dl_model().getvalue()) > 1000 and a._dl_summary().getvalue()[:4] == b"\x89PNG"
+    rows = a._dl_labels().getvalue().decode().splitlines()
+    assert rows[0].startswith("row,kept,dim_index,manifold") and len(rows) == len(a.X) + 1
+    ns: dict = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        exec(compile(a.script(), "session.py", "exec"), ns)  # noqa: S102 - our own generated script
+    L = ns["learner"]
+    assert [(m.dim, m.graph.n_nodes) for m in L.manifolds_] == [(m.dim, m.graph.n_nodes) for m in a.learner.manifolds_]
+
+
+def test_errors_are_reported_in_the_page(app, tmp_path):
+    a = App()
+    a._guard(a._run_step_impl, 2)
+    assert a.alert.alert_type == "danger" and "load a data set" in a.alert.object
+    a.w_path.value = str(tmp_path / "missing.csv")
+    a._guard(a._load_path)
+    assert a.alert.alert_type == "danger"
+    f = tmp_path / "t.csv"
+    rng = np.random.default_rng(0)
+    T = rng.normal(size=(300, 5))
+    T[3, 2] = np.nan
+    np.savetxt(f, T, delimiter=",", header="a,b,c,d,e", comments="")
+    a.w_path.value = str(f)
+    a._guard(a._load_path)
+    assert a.alert.alert_type == "success" and a.table.shape == (299, 5) and a.feature_names == ["a", "b", "c"]
+    a.w_features.value = ["a"]
+    a._guard(a._apply_features)
+    assert a.alert.alert_type == "danger"
+    a.w_features.value = ["a", "b", "d", "e"]
+    a.w_standardise.value = True
+    a._guard(a._apply_features)
+    assert a.X.shape == (299, 4) and np.allclose(a.X.std(0), 1)
+
+
+def test_scene_and_radius_helpers(rng):
+    X = rng.uniform(size=(5000, 3))
+    r = suggest_radius(X)
+    import examm
+    assert 20 <= np.median(examm._core.KDTree(X).radius_count(X[:500], r)) <= 45
+    sc = Scene().points("p", X[:100]).points("q", X[:50, :2], np.zeros((50, 3), np.uint8)).lines(
+        "l", X[:10], [[0, 1], [1, 2]]).sphere("s", X[0], 0.1)
+    assert [l[0] for l in sc.layers] == ["points", "points", "lines", "lines"]
+    pane, used = render(sc, "plotly")
+    assert used == "plotly" and len(pane.object.data) == 4
