@@ -240,8 +240,16 @@ Dimensionality → Graphs → AGTM → Explore & export**. Each step has its par
 key numbers and a diagnostic figure; the 3-D view shows the layers of all completed steps
 together (raw data, kept and diffused points, dimensionality index, graphs, attached points,
 fitted models, the scale `r`). Changing a parameter marks the later steps as to be redone. The
-last step exports the fitted model, per-point results, a summary figure and a Python script that
-reproduces the session.
+last step exports the fitted model, per-point results, a summary figure, a Python script that
+reproduces the session, and the standalone interactive viewer (one HTML page with the 3-D data view,
+each structure's unfolded graph, all structures together and the outlier criteria).
+
+The steps expose the same choices as the library:
+
+- **Preprocess**: optional thinning of over-dense regions; the filter (density filter or LAAT) and the
+  diffusion (SAF or MBMS) are chosen separately, so the default pair and the 1-DREAM pair can be mixed.
+- **Dimensionality**: smoothing width, estimating the index on a thinned copy of the data
+  (`index_preprocess`), and the inverse-density weighting (`index_density_weight`).
 
 Because it runs in the browser it needs no X server under WSL, and it can be used on a remote
 machine through an SSH port forward (`ssh -L 5006:localhost:5006 host`, then `examm-gui

@@ -96,3 +96,29 @@ def test_scene_and_radius_helpers(rng):
     assert [l[0] for l in sc.layers] == ["points", "points", "lines", "lines"]
     pane, used = render(sc, "plotly")
     assert used == "plotly" and len(pane.object.data) == 4
+
+
+def test_laat_mbms_thinned_index_and_viewer_export():
+    a = App()
+    a.w_example.value = "Three filaments (3-D)"
+    a._load_example()
+    a.w_filt.value, a.w_diff.value = "laat", "mbms"
+    assert a.w_la_ants.visible and a.w_mb_dim.visible and not a.w_saf_h.visible and not a.w_f_min.visible
+    a.w_idx_thin.value, a.w_smooth.value = True, 2.0
+    assert a.w_idx_rad.visible
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for step in (2, 3, 4, 5):
+            a._run_step_impl(step)
+    L = a.learner
+    assert [n for n, _ in L.preprocess_.info["steps"]] == ["LAAT", "MBMS"] and a.fig_pre.object is not None
+    assert hasattr(L, "index_source_") and len(L.manifolds_) >= 1
+    script = a.script()
+    assert "LAAT(" in script and "MBMS(" in script and "DensityThin(" in script and "index_preprocess=index_preprocess" in script
+    ns: dict = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        exec(compile(script, "session.py", "exec"), ns)  # noqa: S102 - our own generated script
+    assert [(m.dim, m.graph.n_nodes) for m in ns["learner"].manifolds_] == [(m.dim, m.graph.n_nodes) for m in L.manifolds_]
+    html = a._dl_viewer().getvalue().decode()
+    assert html.startswith("<!doctype html>") and "Topology (all structures)" in html and "GUI session" in html
