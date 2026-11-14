@@ -70,7 +70,17 @@ def save(obj, path) -> None:
         pickle.dump(obj, fh, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+class _Unpickler(pickle.Unpickler):
+    """Reads files written when the package was called ``examm``."""
+
+    def find_class(self, module, name):
+        if module == "examm" or module.startswith("examm."):
+            module = "manydream" + module[len("examm"):]
+        return super().find_class(module, name)
+
+
 def load(path):
-    """Load an object stored with :func:`save`. Only open files you trust."""
+    """Load an object stored with :func:`save` (also by earlier versions, when the package was
+    called ``examm``). Only open files you trust."""
     with open(path, "rb") as fh:
-        return pickle.load(fh)
+        return _Unpickler(fh).load()

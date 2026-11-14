@@ -3,8 +3,8 @@ requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "examm"
-version = "0.1.0"
+name = "manydream"
+version = "0.2.0"
 description = "Probabilistic modelling of general noisy multi-manifold data sets: denoising, dimensionality index, manifold crawling and Abstract GTM"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,21 +26,21 @@ viz = ["matplotlib>=3.6", "networkx", "plotly>=5.18"]
 gui = ["matplotlib>=3.6", "panel>=1.4", "pyvista>=0.43", "vtk>=9.2", "plotly>=5.18", "pandas>=1.5", "networkx"]
 io = ["h5py", "astropy", "pandas>=1.5"]
 test = ["pytest", "matplotlib>=3.6", "networkx", "plotly>=5.18"]
-all = ["examm[viz,gui,io,test]", "networkx"]
+all = ["manydream[viz,gui,io,test]", "networkx"]
 
 [project.scripts]
-examm-gui = "examm.gui.app:main"
+manydream-gui = "manydream.gui.app:main"
 
-[project.entry-points."examm.preprocessors"]
-saf = "examm.preprocess:SAF"
-density = "examm.preprocess:DensityFilter"
-thin = "examm.preprocess:DensityThin"
+[project.entry-points."manydream.preprocessors"]
+saf = "manydream.preprocess:SAF"
+density = "manydream.preprocess:DensityFilter"
+thin = "manydream.preprocess:DensityThin"
 
 [tool.scikit-build]
-wheel.packages = ["src/examm"]
+wheel.packages = ["src/manydream"]
 # a development copy of the extension in src/ is kept out of the sdist (wheels are built from it)
-wheel.exclude = ["examm/**/__pycache__"]
-sdist.exclude = ["src/examm/_core*.so", "build", "docs/img", "examples/*.ipynb", "**/__pycache__"]
+wheel.exclude = ["manydream/**/__pycache__"]
+sdist.exclude = ["src/manydream/_core*.so", "build", "docs/img", "examples/*.ipynb", "**/__pycache__"]
 cmake.build-type = "Release"
 minimum-version = "0.9"
 

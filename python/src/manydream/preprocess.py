@@ -11,7 +11,7 @@ without touching the rest of the pipeline::
             moved = ...                     # new positions for the kept points
             return state.select(keep).with_diffused(moved)
 
-Steps can be registered by name with :func:`register` or through the ``examm.preprocessors``
+Steps can be registered by name with :func:`register` or through the ``manydream.preprocessors``
 entry-point group of an installed package.
 """
 from __future__ import annotations
@@ -486,7 +486,7 @@ def _load_entry_points() -> None:
     try:
         from importlib.metadata import entry_points
 
-        for ep in entry_points(group="examm.preprocessors"):
+        for ep in entry_points(group="manydream.preprocessors"):
             _REGISTRY.setdefault(ep.name, ep.load())
     except Exception:  # pragma: no cover - plugin discovery must never break the import
         pass

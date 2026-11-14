@@ -12,8 +12,8 @@ import warnings
 
 import numpy as np
 
-import examm
-from examm.viewer import export_viewer
+import manydream
+from manydream.viewer import export_viewer
 
 parser = argparse.ArgumentParser()
 parser.add_argument("data")
@@ -21,16 +21,16 @@ parser.add_argument("--labels", help="table with one row per point (same order) 
 parser.add_argument("-o", "--output", default="viewer.html")
 args = parser.parse_args()
 
-X, names = examm.io.load_table(args.data)
+X, names = manydream.io.load_table(args.data)
 
 def plain():
-    return examm.Pipeline([examm.SAF(), examm.DensityFilter(radius_factor=1.0, min_points=10)])
+    return manydream.Pipeline([manydream.SAF(), manydream.DensityFilter(radius_factor=1.0, min_points=10)])
 
 def thinned(radius, target=30):
-    return examm.Pipeline([examm.DensityThin(radius=radius, target=target), examm.SAF(),
-                           examm.DensityFilter(radius_factor=1.0, min_points=10)])
+    return manydream.Pipeline([manydream.DensityThin(radius=radius, target=target), manydream.SAF(),
+                           manydream.DensityFilter(radius_factor=1.0, min_points=10)])
 
-# name -> keyword arguments of examm.build_hierarchy (radii go from coarse to fine)
+# name -> keyword arguments of manydream.build_hierarchy (radii go from coarse to fine)
 RUNS = {
     "Thinned hierarchy (r=0.7, then r=0.4)": dict(radii=[0.7, 0.4], preprocess=[thinned(0.4), plain()]),
     "One level, no thinning (r=0.4)": dict(radii=[0.4], preprocess=[plain()]),
@@ -38,9 +38,9 @@ RUNS = {
 
 versions = {}
 with warnings.catch_warnings():
-    warnings.simplefilter("ignore", examm.DegenerateModelWarning)
+    warnings.simplefilter("ignore", manydream.DegenerateModelWarning)
     for name, kw in RUNS.items():
-        versions[name] = examm.build_hierarchy(X, background=0.01, agtm_params=dict(min_resp=3), random_state=0, **kw)
+        versions[name] = manydream.build_hierarchy(X, background=0.01, agtm_params=dict(min_resp=3), random_state=0, **kw)
         print(name); print(versions[name].summary())
 
 extra = None
@@ -59,6 +59,6 @@ if args.labels:
         except ValueError:
             extra[key] = np.array(col)
 
-out = export_viewer(args.output, X, versions, names=names, extra=extra, title=f"examm: {args.data}")
-examm.io.save(versions, args.output.rsplit(".", 1)[0] + "_models.pkl")
+out = export_viewer(args.output, X, versions, names=names, extra=extra, title=f"manydream: {args.data}")
+manydream.io.save(versions, args.output.rsplit(".", 1)[0] + "_models.pkl")
 print("wrote", out)

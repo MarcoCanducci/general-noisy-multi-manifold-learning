@@ -1,12 +1,12 @@
 // Small dense linear algebra helpers (symmetric eigen-decomposition, covariance).
-// Part of examm (AGPL-3.0-or-later).
+// Part of manydream (AGPL-3.0-or-later).
 #pragma once
 #include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <vector>
 
-namespace examm {
+namespace manydream {
 
 // Cyclic Jacobi eigen-decomposition of a symmetric d x d matrix A (row-major, destroyed).
 // evals are returned in descending order; evecs holds the matching unit eigenvectors as rows.
@@ -78,4 +78,4 @@ inline void covariance(GetRow&& row, size_t count, int d, double* mean, double* 
         for (int b = a; b < d; ++b) cov[a * d + b] = cov[b * d + a] = cov[a * d + b] * norm;
 }
 
-} // namespace examm
+} // namespace manydream

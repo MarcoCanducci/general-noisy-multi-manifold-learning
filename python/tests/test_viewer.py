@@ -8,9 +8,9 @@ import pytest
 
 pytest.importorskip("plotly")
 
-from examm import HierarchicalAGTM, ManifoldGraph, datasets  # noqa: E402
-from examm.crawling import crawl  # noqa: E402
-from examm.viewer import _graph_embedding, export_viewer, viewer_payload  # noqa: E402
+from manydream import HierarchicalAGTM, ManifoldGraph, datasets  # noqa: E402
+from manydream.crawling import crawl  # noqa: E402
+from manydream.viewer import _graph_embedding, export_viewer, viewer_payload  # noqa: E402
 
 
 def small_hierarchy(rng):
@@ -110,7 +110,7 @@ def test_graph_embedding_unfolds_structures_in_their_own_dimension(rng):
 
 
 def test_points_fill_the_layout_of_a_surface(rng):
-    from examm.viewer import _point_layout
+    from manydream.viewer import _point_layout
 
     # a flat lattice in the plane of a 5-D space, laid out by the identity: points must land on themselves
     gx, gy = np.meshgrid(np.arange(6.0), np.arange(6.0), indexing="ij")
@@ -125,7 +125,7 @@ def test_points_fill_the_layout_of_a_surface(rng):
 
 
 def test_cloud_embedding_recovers_a_flat_sheet(rng):
-    from examm.viewer import _cloud_embedding
+    from manydream.viewer import _cloud_embedding
 
     P = np.c_[rng.uniform(0, 4, (1500, 2)), np.zeros((1500, 3))]
     means = np.c_[np.array([[1.0, 1.0], [3.0, 1.0], [1.0, 3.0], [3.0, 3.0]]), np.zeros((4, 3))]
@@ -137,11 +137,11 @@ def test_cloud_embedding_recovers_a_flat_sheet(rng):
 
 
 def test_dimension_labels_follow_the_detection_runs(rng):
-    import examm
-    from examm.viewer import _dimension_labels, viewer_payload
+    import manydream
+    from manydream.viewer import _dimension_labels, viewer_payload
 
     X = np.r_[np.c_[rng.uniform(0, 3, (900, 2)), rng.normal(0, 0.01, 900)], rng.uniform(-1, 4, (60, 3))]
-    H = examm.build_hierarchy(X, [0.3], dims=[[1, 2]], random_state=0)
+    H = manydream.build_hierarchy(X, [0.3], dims=[[1, 2]], random_state=0)
     hard, smooth = _dimension_labels(H, len(X))
     L = H.detections_[0]["learner"]
     assert np.array_equal(smooth[L.preprocess_.indices], L.dim_result_.index)
@@ -155,12 +155,12 @@ def test_dimension_labels_follow_the_detection_runs(rng):
 
 
 def test_point_status_accounts_for_every_point(rng):
-    import examm
-    from examm.viewer import _point_status, viewer_payload
+    import manydream
+    from manydream.viewer import _point_status, viewer_payload
 
     X = np.r_[np.c_[rng.uniform(0, 3, (2500, 2)), rng.normal(0, 0.01, 2500)], rng.uniform(-1, 4, (80, 3))]
-    pre = examm.Pipeline([examm.DensityThin(radius=0.2, target=20, random_state=0), examm.SAF(), examm.DensityFilter()])
-    H = examm.build_hierarchy(X, [0.3], preprocess=[pre], dims=[[1, 2]], random_state=0)
+    pre = manydream.Pipeline([manydream.DensityThin(radius=0.2, target=20, random_state=0), manydream.SAF(), manydream.DensityFilter()])
+    H = manydream.build_hierarchy(X, [0.3], preprocess=[pre], dims=[[1, 2]], random_state=0)
     L = H.detections_[0]["learner"]
     assert [n for n, _ in L.preprocess_.info["steps"]] == ["DensityThin", "SAF", "DensityFilter"]
     status, names, text = _point_status(H, len(X))

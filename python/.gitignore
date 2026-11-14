@@ -3,5 +3,5 @@ dist/
 *.egg-info/
 __pycache__/
 .pytest_cache/
-src/examm/_core*.so
+src/manydream/_core*.so
 .ipynb_checkpoints/

@@ -21,7 +21,7 @@ STAGES = ("preprocess", "dimension", "graphs", "agtm")
 # which stage each parameter first affects
 _PARAM_STAGE = {
     "r": 0, "preprocess": 0,
-    "smooth_factor": 1, "dim_min_points": 1, "index_preprocess": 1,
+    "smooth_factor": 1, "dim_min_points": 1, "index_preprocess": 1, "index_density_weight": 1,
     "dims": 2, "graph": 2, "eta": 2, "beta": 2, "min_points": 2, "min_nodes": 2, "min_residual": 2,
     "angle_threshold": 2, "attach": 2,
     "epsilon": 3, "agtm_params": 3, "background": 3,
@@ -63,12 +63,14 @@ class MultiManifoldLearner:
     Parameters
     ----------
     r : float
-        Characteristic scale: radius of the local linearisations used by the dimensionality
-        index and by crawling. The single most important parameter.
+        Characteristic scale: radius of the local neighbourhoods used by the dimensionality
+        index and by crawling. It is the physical size at which a structure is locally linear,
+        i.e. can be approximated by a flat patch of its own dimension; larger than the noise
+        across the structures. The single most important parameter.
     preprocess : str, Preprocessor, list or None
         Denoising / diffusion stage. ``"saf"`` (default) runs SAF diffusion followed by the
         density filter; ``None`` uses the data as they are; any object implementing
-        :class:`examm.preprocess.Preprocessor` (or a list of them) can be given.
+        :class:`manydream.preprocess.Preprocessor` (or a list of them) can be given.
     dims : iterable of int, optional
         Intrinsic dimensions to extract. Default ``1 .. d-1``.
     graph : {"crawl", "epsilon"}
@@ -91,7 +93,7 @@ class MultiManifoldLearner:
     background : float
         Weight of a uniform background component in the combined model (0 = none).
     agtm_params : dict, optional
-        Extra keyword arguments for :class:`examm.AGTM`.
+        Extra keyword arguments for :class:`manydream.AGTM`.
     random_state : int or Generator, optional
     n_jobs : int, optional
         Threads for the compiled kernels (default: all cores).
@@ -111,7 +113,8 @@ class MultiManifoldLearner:
 
     def __init__(self, r: float, *, preprocess="saf", dims=None, graph: str = "crawl", eta: float = 0.75,
                  beta: float = 0.4, epsilon: int = 1, smooth_factor: float = 1.0,
-                 dim_min_points: int | None = None, index_preprocess=None, min_points: int = 5, min_nodes: int | None = None,
+                 dim_min_points: int | None = None, index_preprocess=None, index_density_weight: bool = False,
+                 min_points: int = 5, min_nodes: int | None = None,
                  min_residual: int = 20, angle_threshold: float = 2.0 / 3.0, attach: str = "same_dim",
                  background: float = 0.0, agtm_params: dict | None = None, random_state=None,
                  n_jobs: int | None = None, verbose: bool = False):
@@ -125,6 +128,7 @@ class MultiManifoldLearner:
         self.smooth_factor = smooth_factor
         self.dim_min_points = dim_min_points
         self.index_preprocess = index_preprocess
+        self.index_density_weight = index_density_weight
         self.min_points = min_points
         self.min_nodes = min_nodes
         self.min_residual = min_residual
@@ -158,7 +162,7 @@ class MultiManifoldLearner:
 
     def _log(self, msg):
         if self.verbose:
-            print(f"[examm] {msg}", flush=True)
+            print(f"[manydream] {msg}", flush=True)
 
     def _validate(self):
         check_radius(self.r)
@@ -186,7 +190,8 @@ class MultiManifoldLearner:
         if self.index_preprocess is None:
             self.dim_result_ = dimensionality_index(self.preprocess_.diffused, float(self.r),
                                                     smooth_factor=self.smooth_factor,
-                                                    min_points=self.dim_min_points)
+                                                    min_points=self.dim_min_points,
+                                                    density_weight=bool(self.index_density_weight))
         else:
             # estimate the index on a separately preprocessed (typically density-thinned) subset,
             # where dense regions cannot outvote the rest, and carry it to every modelled point
@@ -198,7 +203,8 @@ class MultiManifoldLearner:
             if len(sub) == 0:
                 raise ValueError("index_preprocess removed every point")
             res = dimensionality_index(sub.diffused, float(self.r), smooth_factor=self.smooth_factor,
-                                       min_points=self.dim_min_points)
+                                       min_points=self.dim_min_points,
+                                       density_weight=bool(self.index_density_weight))
             _, nn = cKDTree(sub.noisy).query(self.preprocess_.noisy)
             self.dim_result_ = type(res)(**{f.name: (None if getattr(res, f.name) is None else getattr(res, f.name)[nn])
                                             for f in fields(res)})

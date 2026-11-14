@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(examm LANGUAGES CXX)
+project(manydream LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,7 +17,7 @@ target_include_directories(_core PRIVATE cpp)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX)
 else()
-  message(WARNING "OpenMP not found: examm will run single-threaded")
+  message(WARNING "OpenMP not found: manydream will run single-threaded")
 endif()
 
-install(TARGETS _core LIBRARY DESTINATION examm)
+install(TARGETS _core LIBRARY DESTINATION manydream)

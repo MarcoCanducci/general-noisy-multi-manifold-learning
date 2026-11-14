@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from examm import _core
+from manydream import _core
 
 
 @pytest.mark.parametrize("d", [1, 2, 3, 5, 8])
