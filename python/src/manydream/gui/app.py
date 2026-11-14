@@ -268,9 +268,11 @@ class App:
                              "shows each quantity against the position along the filament and the distance from its "
                              "core. The *co-moving frames* show the quantities, the point density and the fitted "
                              "model on a plane perpendicular to the filament, moved along it."),
-            self.w_sv_vals, pn.Row(self.w_sv_rmax, self.w_sv_nrad), self.b_sv_prof, self.fig_sv_prof,
-            pn.Row(self.w_sv_side, self.w_sv_up), self.w_sv_thick, self.b_sv_frames, self.sv_info, self.w_sv_frame,
-            self.fig_sv_frame, self.dl_sv_movie, visible=False)
+            self.w_sv_vals, pn.Row(self.w_sv_rmax, self.w_sv_nrad), self.b_sv_prof,
+            pn.Row(self.w_sv_side, self.w_sv_up), self.w_sv_thick, self.b_sv_frames, self.sv_info, self.dl_sv_movie,
+            pn.pane.Markdown("*The figures appear on the right, above the 3-D view.*"), visible=False)
+        # the figures of the filament views are wide: they go above the 3-D view
+        self.sv_figures = pn.Column(self.fig_sv_prof, self.w_sv_frame, self.fig_sv_frame, sizing_mode="stretch_width", visible=False)
         tab_exp = pn.Column(
             pn.pane.Markdown("**7. Explore & export** — select a manifold to isolate it in the view. For 1-D "
                              "manifolds the quantity is shown along the filament, for higher dimensions on the "
@@ -299,7 +301,7 @@ class App:
         for w in (self.w_az, self.w_el, self.w_zoom):
             w.param.watch(lambda e: self._guard(self.refresh_view), "value_throttled")
         self.cam_row = pn.Row(self.w_az, self.w_el, self.w_zoom, visible=self.backend == "pyvista")
-        right = pn.Column(pn.Row(pn.pane.Markdown("**Layers**"), self.w_layers), self.cam_row, self.view_holder,
+        right = pn.Column(pn.Row(pn.pane.Markdown("**Layers**"), self.w_layers), self.cam_row, self.sv_figures, self.view_holder,
                           self.backend_note, self.summary, sizing_mode="stretch_width")
         self.root = pn.Column(
             pn.Row(pn.pane.Markdown("## MANY-DREAM — noisy multi-manifold learning"), pn.Spacer(), self.spinner),
@@ -623,7 +625,7 @@ class App:
         if self.sv_box.visible != is_curve or getattr(self, "_sv_for", None) != k:
             self.sv_box.visible, self._sv_for, self._sv_frames = is_curve, k, None
             self.fig_sv_prof.object = self.fig_sv_frame.object = None
-            self.w_sv_frame.visible = self.dl_sv_movie.visible = False
+            self.w_sv_frame.visible = self.dl_sv_movie.visible = self.sv_figures.visible = False
             self.sv_info.object = ""
             if is_curve:
                 passive = [c for c in self.columns if c not in self.feature_names]
@@ -660,7 +662,8 @@ class App:
 
         m, vals = self._sv_target()
         res = sv.bidimensional_profile(m, self.X, vals, r_max=float(self.w_sv_rmax.value), n_radial=int(self.w_sv_nrad.value))
-        self._fig(self.fig_sv_prof, sv.plot_bidimensional_profile(res, figsize=(7, 1.7 * (len(vals) + 1) + 0.7)))
+        self._fig(self.fig_sv_prof, sv.plot_bidimensional_profile(res, figsize=(11, 1.6 * (len(vals) + 1) + 0.7)))
+        self.sv_figures.visible = True
         self._say("Bi-dimensional profile: position along the filament against distance from its core.", "success")
 
     def _sv_compute_frames(self):
@@ -671,7 +674,7 @@ class App:
                                              half_thickness=float(self.w_sv_thick.value) or None)
         n = len(self._sv_frames["centers"])
         self.w_sv_frame.param.update(start=0, end=n - 1, value=n // 2, visible=True)
-        self.dl_sv_movie.visible = True
+        self.dl_sv_movie.visible = self.sv_figures.visible = True
         pts = self._sv_frames["n_points"]
         self.sv_info.object = (f"{n} frames; points on a plane: median {int(np.median(pts))}, fewest {int(pts.min())}."
                                + (" Few points per plane: increase the half thickness." if np.median(pts) < 20 else ""))
