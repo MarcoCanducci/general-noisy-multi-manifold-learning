@@ -240,6 +240,10 @@ class App:
                                         label="Download per-point results (CSV)", button_type="default")
         self.dl_summary = W.FileDownload(callback=self._dl_summary, filename="manydream_summary.png",
                                          label="Download summary figure", button_type="default")
+        self.dl_skeleton = W.FileDownload(callback=self._dl_skeleton, filename="manydream_skeleton.zip",
+                                          label="Download skeletons: nodes and edges (CSV)", button_type="default")
+        self.dl_member = W.FileDownload(callback=self._dl_membership, filename="manydream_membership.csv",
+                                        label="Download membership probabilities (CSV)", button_type="default")
         self.dl_viewer = W.FileDownload(callback=self._dl_viewer, filename="manydream_viewer.html",
                                         label="Download interactive viewer (HTML)", button_type="primary")
         self.w_manifold.param.watch(lambda e: self._guard(self._explore), "value")
@@ -282,7 +286,7 @@ class App:
                              "this app: the data and the structures in 3-D, each structure's unfolded graph, all "
                              "structures together, outliers by percentile or threshold for several criteria, and "
                              "the columns you did not model as colours. Building it takes up to a few minutes."),
-            self.dl_viewer, self.dl_script, self.dl_model, self.dl_labels, self.dl_summary)
+            self.dl_viewer, self.dl_script, self.dl_model, self.dl_labels, self.dl_member, self.dl_skeleton, self.dl_summary)
 
         self.tabs = pn.Tabs(*[(f"{k + 1}. {n}", t) for k, (n, t) in enumerate(zip(
             STEPS, [tab_data, tab_feat, tab_pre, tab_dim, tab_graph, tab_agtm, tab_exp]))],
@@ -811,6 +815,28 @@ class App:
             out = export_viewer(Path(tmp) / "viewer.html", self.X, {"GUI session": H}, names=self.feature_names,
                                 title="MANY-DREAM viewer", extra=extra)
             return io.BytesIO(out.read_bytes())
+
+    def _dl_skeleton(self):
+        """Zip with the nodes and the edges of every fitted structure."""
+        import zipfile
+
+        from manydream import results
+
+        L = self._need_fit()
+        buf = io.BytesIO()
+        with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in results.save_skeleton(L, Path(tmp) / "skeleton"):
+                z.write(f, f.name)
+        buf.seek(0)
+        return buf
+
+    def _dl_membership(self):
+        """Per point: probability of each structure and of the background."""
+        from manydream import results
+
+        L = self._need_fit()
+        with tempfile.TemporaryDirectory() as tmp:
+            return io.BytesIO(results.save_membership(L, Path(tmp) / "m.csv").read_bytes())
 
     def _dl_summary(self):
         import matplotlib.pyplot as plt

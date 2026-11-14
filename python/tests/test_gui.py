@@ -142,3 +142,13 @@ def test_filament_views_in_the_explore_step(app):
     assert not a.sv_box.visible and a._sv_frames is None
     a._guard(a._sv_profile)
     assert a.alert.alert_type == "danger"
+
+
+def test_skeleton_and_membership_downloads(app):
+    import io
+    import zipfile
+
+    z = zipfile.ZipFile(io.BytesIO(app._dl_skeleton().getvalue()))
+    assert sorted(z.namelist()) == ["skeleton_edges.csv", "skeleton_nodes.csv"]
+    rows = app._dl_membership().getvalue().decode().splitlines()
+    assert rows[0].startswith("row,structure,p_on_structure,p_background") and len(rows) == len(app.X) + 1

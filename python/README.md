@@ -236,6 +236,28 @@ again; `examples/05_viewer_for_your_data.py` does both from the command line.
   passed as `extra=` or loaded later in the page from a CSV (one line per point in the original
   order, or with a `row` column holding the point index). A loaded file stays in the browser.
 
+## Using the results: skeletons, membership, validation
+
+```python
+from manydream import results
+
+results.save_skeleton(learner, "run1")            # run1_nodes.csv and run1_edges.csv
+m = results.membership(learner)                   # per point: P(each structure), P(background)
+clean = X[m["on_structure"] > 0.5]                # noise cleaning
+results.save_membership(learner, "run1_membership.csv")
+
+report = results.validate(m["structure"], truth, names)   # truth: 0 = noise, k = k-th manifold
+print(report)
+```
+
+| Function | What it gives |
+|---|---|
+| `skeleton`, `save_skeleton` | The nodes and edges of every fitted structure (positions after training, on the mean curve or surface). |
+| `membership`, `save_membership` | For every point, the probability of belonging to each structure or to the uniform background, and the most probable one. |
+| `validate` | Against known labels: true and false positives and negatives for noise against structure, with precision and recall; and for each true manifold its best-matching structure, recall, purity and the number of pieces it was split into. |
+
+The GUI's last step offers the skeleton and the membership table as downloads.
+
 ## Views of one-dimensional manifolds (1-DREAM)
 
 `manydream.streamviz` implements the two visualisation techniques of the 1-DREAM paper (Canducci et al.
