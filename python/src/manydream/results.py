@@ -69,7 +69,7 @@ def membership(learner, X=None, background: float | None = None) -> dict:
     The structures form a mixture, weighted by their numbers of points, with a uniform
     background over the extent of the data. ``background`` is its prior weight; by default the
     learner's own value, or 0.05 if that is zero (without a background every point is forced
-    onto some structure). Returns ``proba`` (n, structures + 1; the last column is the
+    onto some structure). Points outside the extent of the training data are background. Returns ``proba`` (n, structures + 1; the last column is the
     background), ``structure`` (most probable one, -1 for background), ``on_structure``
     (1 - background probability) and ``log_density``.
     """
@@ -80,6 +80,9 @@ def membership(learner, X=None, background: float | None = None) -> dict:
     model = MultiManifoldModel([m.agtm for m in ms], weights=[m.n_points for m in ms], background=bg, bounds=(lo, hi))
     P = model.predict_proba(X)
     P = np.where(np.isfinite(P), P, 0.0)
+    outside = ~((X >= lo) & (X <= hi)).all(1)          # beyond the extent of the data: no structure can claim the point
+    P[outside] = 0.0
+    P[outside, -1] = 1.0
     lab = np.argmax(P, axis=1)
     lab[lab == len(ms)] = -1
     return {"proba": P, "structure": lab, "on_structure": 1.0 - P[:, -1], "log_density": model.score_samples(X),

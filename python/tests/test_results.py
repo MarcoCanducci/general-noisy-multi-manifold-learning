@@ -34,6 +34,8 @@ def test_membership_separates_structure_from_background(fitted, tmp_path):
     assert np.median(r["on_structure"][d.label > 0]) > 0.9 > 0.2 > np.median(r["on_structure"][d.label == 0])
     far = results.membership(L, d.X.max(0)[None] + 0.0)                 # a corner of the box: background
     assert far["structure"][0] == -1
+    beyond = results.membership(L, d.X.max(0)[None] + 5.0)              # outside the data altogether
+    assert beyond["structure"][0] == -1 and beyond["on_structure"][0] == 0.0
     out = results.save_membership(L, tmp_path / "m.csv")
     assert out.read_text().splitlines()[0].startswith("row,structure,p_on_structure,p_background,p_structure_0")
 
