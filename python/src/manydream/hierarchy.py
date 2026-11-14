@@ -451,7 +451,7 @@ def build_hierarchy(X, radii, *, preprocess=None, index_preprocess=None, dims=No
                 kids = H.add_children(graphs, node)
             nxt.extend(kids)
             if verbose:
-                print(f"[examm] level {k + 2}, parent {node.label}: r = {r:g}, {len(region)} points, "
+                print(f"[manydream] level {k + 2}, parent {node.label}: r = {r:g}, {len(region)} points, "
                       f"{len(kids)} structures", flush=True)
         frontier = nxt
         if not frontier:

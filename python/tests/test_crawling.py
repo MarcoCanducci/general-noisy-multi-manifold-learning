@@ -2,13 +2,13 @@ import numpy as np
 import pytest
 from scipy.sparse import csgraph
 
-import examm
-from examm import datasets
-from examm.crawling import crawl, multi_manifold_crawl
+import manydream
+from manydream import datasets
+from manydream.crawling import crawl, multi_manifold_crawl
 
 
 def covered(graph, X, r):
-    return examm._core.KDTree(X).radius_union(graph.nodes, r).astype(bool).mean()
+    return manydream._core.KDTree(X).radius_union(graph.nodes, r).astype(bool).mean()
 
 
 def test_circle_is_a_closed_chain(rng):
@@ -52,8 +52,8 @@ def test_three_torus_in_4d_is_one_3d_manifold():
 
 def test_multi_manifold_crawl_separates_interlocked_toroids():
     ds = datasets.make_three_toroids(scale=0.6, random_state=3)
-    res = examm.preprocess.resolve("saf").fit_transform(ds.X, 0.1)
-    idx = examm.dimensionality_index(res.diffused, 0.1).index
+    res = manydream.preprocess.resolve("saf").fit_transform(ds.X, 0.1)
+    idx = manydream.dimensionality_index(res.diffused, 0.1).index
     sel = idx == 2
     lab = ds.label[res.indices][sel]
     a = multi_manifold_crawl(res.diffused[sel], 0.1, 2, noisy=res.noisy[sel], random_state=0)
@@ -68,7 +68,7 @@ def test_multi_manifold_crawl_separates_interlocked_toroids():
     b = multi_manifold_crawl(res.diffused[sel], 0.1, 2, noisy=res.noisy[sel], random_state=0)
     assert all(np.array_equal(x.nodes, y.nodes) and np.array_equal(x.edges, y.edges) for x, y in zip(a, b))
     # the faster epsilon-graph alternative finds the same three structures (possibly fragmented)
-    e = examm.epsilon_graph(res.diffused[sel], 0.1, 2, noisy=res.noisy[sel], random_state=0)
+    e = manydream.epsilon_graph(res.diffused[sel], 0.1, 2, noisy=res.noisy[sel], random_state=0)
     big = [g for g in e if g.n_nodes > 100]
     assert len(big) >= 3
     for g in big:
@@ -93,7 +93,7 @@ def test_crawling_terminates_on_noise_and_bad_input(rng):
 def test_graph_helpers(rng):
     X = datasets.circle(2000, 1.0, 2, rng)
     g = crawl(X, 0.2, 1, seed=0)
-    two = examm.ManifoldGraph(np.vstack([g.nodes, g.nodes + 5]), np.vstack([g.edges, g.edges + g.n_nodes]), 1)
+    two = manydream.ManifoldGraph(np.vstack([g.nodes, g.nodes + 5]), np.vstack([g.edges, g.edges + g.n_nodes]), 1)
     parts = two.components()
     assert len(parts) == 2 and all(p.n_nodes == g.n_nodes and p.n_edges == g.n_edges for p in parts)
     assert np.isclose(g.total_length(), g.edge_lengths.sum())

@@ -1,10 +1,10 @@
 import numpy as np
 import pytest
 
-import examm
-from examm import datasets
-from examm.dimension import barycentric, dimensionality_index, fisher_distance
-from examm.preprocess import SAF, DensityFilter, DensityThin, Pipeline, PreprocessResult, Preprocessor, resolve
+import manydream
+from manydream import datasets
+from manydream.dimension import barycentric, dimensionality_index, fisher_distance
+from manydream.preprocess import SAF, DensityFilter, DensityThin, Pipeline, PreprocessResult, Preprocessor, resolve
 
 
 def saf_reference(samples, original, h, mu, support):
@@ -26,7 +26,7 @@ def saf_reference(samples, original, h, mu, support):
 def test_saf_step_matches_reference(rng, d):
     X = rng.normal(size=(300, d))
     S = X + 0.01 * rng.normal(size=X.shape)
-    got = examm._core.KDTree(X).saf_step(S, 0.4, 0.3, 0.8)
+    got = manydream._core.KDTree(X).saf_step(S, 0.4, 0.3, 0.8)
     assert np.allclose(got, saf_reference(S, X, 0.4, 0.3, 0.8))
 
 
@@ -66,8 +66,8 @@ def test_custom_preprocessor_plugs_in(rng):
     X = rng.normal(size=(200, 3))
     out = Pipeline([Halve(), SAF(n_iter=1)]).fit_transform(X, r=1.0)
     assert (out.noisy[:, 0] > 0).all() and len(out) == (X[:, 0] > 0).sum()
-    examm.preprocess.register("halve", Halve)
-    assert isinstance(resolve("halve"), Halve) and "halve" in examm.preprocess.available()
+    manydream.preprocess.register("halve", Halve)
+    assert isinstance(resolve("halve"), Halve) and "halve" in manydream.preprocess.available()
     with pytest.raises(ValueError):
         resolve("does-not-exist")
     assert len(resolve(None).fit_transform(X, 1.0)) == len(X)
@@ -126,8 +126,8 @@ def test_density_thinning_evens_out_the_sampling(rng):
     sparse = rng.uniform(-3, 3, size=(2000, 3))
     X = np.vstack([dense, sparse])
     out = DensityThin(target=20).fit_transform(X, r=0.3)
-    tree = examm._core.KDTree(out.noisy)
-    before = examm._core.KDTree(X).radius_count(X, 0.3)
+    tree = manydream._core.KDTree(out.noisy)
+    before = manydream._core.KDTree(X).radius_count(X, 0.3)
     after = tree.radius_count(out.noisy, 0.3)
     assert before.max() > 1000 and np.quantile(after, 0.99) < 45        # dense core reduced to about the target
     kept = np.isin(np.arange(len(X)), out.indices)
@@ -153,28 +153,28 @@ def _curve_in_noise(seed=7):
 
 
 def test_laat_keeps_the_filament_and_drops_the_background():
-    import examm
+    import manydream
 
     X, truth, _ = _curve_in_noise()
-    out = examm.LAAT().fit_transform(X, 0.5)
+    out = manydream.LAAT().fit_transform(X, 0.5)
     keep = np.zeros(len(X), bool)
     keep[out.indices] = True
     assert (keep & truth).sum() / truth.sum() > 0.95          # nearly all of the curve survives
     assert (keep & truth).sum() / keep.sum() > 0.8            # and most of what survives is curve
     F = out.info["laat_pheromone_all"]
     assert F.shape == (len(X),) and F[truth].sum() > 0.85 * F.sum()
-    again = examm.LAAT().fit_transform(X, 0.5)
+    again = manydream.LAAT().fit_transform(X, 0.5)
     assert np.array_equal(out.indices, again.indices)         # reproducible with the default seed
-    assert len(examm.LAAT(threshold=1e9).fit_transform(X, 0.5)) == 0
+    assert len(manydream.LAAT(threshold=1e9).fit_transform(X, 0.5)) == 0
 
 
 def test_mbms_moves_points_onto_the_axis_without_sliding_along_it():
-    import examm
+    import manydream
     from scipy.spatial import cKDTree
 
     X, truth, axis = _curve_in_noise()
     P = X[truth]
-    out = examm.MBMS(dim=1).fit_transform(P, 0.5)
+    out = manydream.MBMS(dim=1).fit_transform(P, 0.5)
     tree = cKDTree(axis)
     d0, i0 = tree.query(P)
     d1, i1 = tree.query(out.diffused)
@@ -184,11 +184,30 @@ def test_mbms_moves_points_onto_the_axis_without_sliding_along_it():
 
 
 def test_laat_and_mbms_drive_the_pipeline():
-    import examm
+    import manydream
 
     X, _, _ = _curve_in_noise()
-    assert {"laat", "mbms", "laat+mbms"} <= set(examm.preprocess.available())
-    m = examm.MultiManifoldLearner(r=0.5, preprocess="laat+mbms", dims=[1], random_state=0).fit(X)
+    assert {"laat", "mbms", "laat+mbms"} <= set(manydream.preprocess.available())
+    m = manydream.MultiManifoldLearner(r=0.5, preprocess="laat+mbms", dims=[1], random_state=0).fit(X)
     assert [n for n, _ in m.preprocess_.info["steps"]] == ["LAAT", "MBMS"]
     big = max(m.manifolds_, key=lambda q: q.n_points)
     assert big.dim == 1 and big.n_points > 900
+
+
+def test_density_weight_keeps_a_dense_body_from_relabelling_an_attached_sheet():
+    import manydream
+
+    rng = np.random.default_rng(0)
+    r, R, n_sheet = 0.3, 0.6, 1500
+    per_disc = n_sheet / 6.0 * np.pi * r ** 2
+    n_ball = int(10 * per_disc / r ** 3 * R ** 3)                    # ten times denser than the sheet at scale r
+    u = rng.normal(size=(n_ball, 3))
+    ball = R * u / np.linalg.norm(u, axis=1, keepdims=True) * rng.uniform(0, 1, (n_ball, 1)) ** (1 / 3)
+    sheet = np.c_[rng.uniform(R - 0.3, R + 2.7, n_sheet), rng.uniform(-1, 1, n_sheet), rng.normal(0, 0.01, n_sheet)]
+    X = np.r_[ball, sheet]
+    near = (sheet[:, 0] > R + 0.15 * r) & (sheet[:, 0] < R + 0.5 * r) & (np.abs(sheet[:, 1]) < 0.6)   # sheet just outside the ball
+    plain = manydream.dimensionality_index(X, r).index[n_ball:]
+    fair = manydream.dimensionality_index(X, r, density_weight=True).index[n_ball:]
+    assert (fair[near] == 2).mean() > 0.9 > (plain[near] == 2).mean() + 0.2
+    far = sheet[:, 0] > R + 2 * r
+    assert (fair[far] == 2).mean() > 0.95 and (plain[far] == 2).mean() > 0.95

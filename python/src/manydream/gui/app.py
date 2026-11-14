@@ -11,10 +11,10 @@ from pathlib import Path
 
 import numpy as np
 
-import examm
-from examm import datasets, viz
-from examm.gui.scene import Scene, pyvista_available, render
-from examm.preprocess import SAF, DensityFilter, Pipeline
+import manydream
+from manydream import datasets, viz
+from manydream.gui.scene import Scene, pyvista_available, render
+from manydream.preprocess import LAAT, MBMS, SAF, DensityFilter, DensityThin, Pipeline
 
 STEPS = ["Data", "Features", "Preprocess", "Dimensionality", "Graphs", "AGTM", "Explore & export"]
 STAGE_OF_STEP = {2: "preprocess", 3: "dimension", 4: "graphs", 5: "agtm"}
@@ -33,7 +33,7 @@ LAYERS = ["Raw data", "Kept points (noisy)", "Diffused points", "Dimensionality 
 def suggest_radius(X, target: int = 30, sample: int = 2000, seed: int = 0) -> float:
     """Radius for which a typical point has about ``target`` neighbours."""
     X = np.ascontiguousarray(X, float)
-    tree = examm._core.KDTree(X)
+    tree = manydream._core.KDTree(X)
     Q = X[np.random.default_rng(seed).choice(len(X), min(sample, len(X)), replace=False)]
     lo, hi = 0.0, float(np.linalg.norm(X.max(0) - X.min(0)))
     for _ in range(40):
@@ -63,7 +63,7 @@ class App:
         self.max_display = max_display
         self.table = None
         self.columns: list[str] = []
-        self.learner: examm.MultiManifoldLearner | None = None
+        self.learner: manydream.MultiManifoldLearner | None = None
         self.X = None
         self.scaling = None
         self.source = ""
@@ -115,42 +115,86 @@ class App:
                              "searched. All selected features are used in every computation; the axes below "
                              "only control the 3-D view."),
             self.w_features, self.w_standardise, self.b_features, pn.layout.Divider(),
-            pn.pane.Markdown("**Scale** — *r* is the radius of the local neighbourhoods used everywhere: it "
-                             "should be larger than the noise thickness and smaller than the distance between "
-                             "separate structures. Tick *Scale r* under Layers to see it in the view."),
+            pn.pane.Markdown("**Scale** — *r* is the radius of the local neighbourhoods used everywhere. It is the "
+                             "physical size at which a structure is locally linear: the scale at which it can be "
+                             "approximated by a flat patch of its own dimension (a segment for a curve, a piece of "
+                             "plane for a surface). It has to be larger than the noise across the structures, and "
+                             "small enough that a neighbourhood does not span their curvature or two separate "
+                             "structures. Tick *Scale r* under Layers to see it in the view."),
             pn.Row(self.w_r, pn.Column(pn.Spacer(height=18), self.b_suggest)), pn.layout.Divider(),
             pn.pane.Markdown("**View**"), pn.Row(*self.w_ax), self.w_pca, self.w_colour)
 
         # --- 3 preprocess
-        self.w_pre = W.Select(name="Method", options=["SAF diffusion + density filter", "SAF diffusion only",
-                                                      "Density filter only", "None"])
+        self.w_thin = W.Checkbox(name="Thin over-dense regions first (for data whose density varies a lot)", value=False)
+        self.w_thin_rad = W.FloatSlider(name="Thinning radius / r", start=0.2, end=2.0, step=0.05, value=1.0)
+        self.w_thin_target = W.IntSlider(name="Thinning: points per ball to keep", start=5, end=200, value=30)
+        self.w_filt = W.Select(name="Filter", options={"Density filter": "density", "LAAT ants (1-DREAM)": "laat", "None": "none"})
+        self.w_diff = W.Select(name="Diffusion", options={"SAF": "saf", "MBMS (1-DREAM)": "mbms", "None": "none"})
         self.w_saf_h = W.FloatSlider(name="SAF kernel scale h / r", start=0.05, end=1.0, step=0.05, value=0.3)
         self.w_saf_mu = W.FloatSlider(name="SAF repulsion mu", start=0.0, end=0.49, step=0.01, value=0.3)
         self.w_saf_it = W.IntSlider(name="SAF iterations", start=1, end=40, value=10)
+        self.w_mb_rad = W.FloatSlider(name="MBMS radius / r", start=0.2, end=1.5, step=0.05, value=0.7)
+        self.w_mb_dim = W.IntSlider(name="MBMS: dimension of the structures (1 = filaments)", start=1, end=3, value=1)
+        self.w_mb_it = W.IntSlider(name="MBMS iterations", start=1, end=20, value=5)
         self.w_f_rad = W.FloatSlider(name="Filter radius / r", start=0.1, end=2.0, step=0.05, value=0.5)
         self.w_f_min = W.IntSlider(name="Filter: minimum points in the ball", start=1, end=60, value=6)
         self.w_f_mode = W.Select(name="Filter: keep", options={"core points": "core", "core + border points": "core+border"})
+        self.w_la_rad = W.FloatSlider(name="LAAT radius of the ants / r", start=0.2, end=1.5, step=0.05, value=0.7)
+        self.w_la_ants = W.IntSlider(name="LAAT: number of ants", start=10, end=500, step=10, value=100)
+        self.w_la_epochs = W.IntSlider(name="LAAT: epochs", start=1, end=100, value=25)
+        self.w_la_steps = W.IntSlider(name="LAAT: steps per epoch", start=10, end=1000, step=10, value=200)
+        self.w_la_kappa = W.FloatSlider(name="LAAT: weight of alignment against pheromone", start=0.0, end=1.0, step=0.05, value=0.5)
+        self.w_la_thr = W.FloatInput(name="LAAT: pheromone threshold, x mean (0 = automatic)", value=0.0, start=0.0)
+        self._pre_groups = {
+            "thin": [self.w_thin_rad, self.w_thin_target],
+            "saf": [self.w_saf_h, self.w_saf_mu, self.w_saf_it], "mbms": [self.w_mb_rad, self.w_mb_dim, self.w_mb_it],
+            "density": [self.w_f_rad, self.w_f_min, self.w_f_mode],
+            "laat": [self.w_la_rad, self.w_la_ants, self.w_la_epochs, self.w_la_steps, self.w_la_kappa, self.w_la_thr]}
+        for w in (self.w_thin, self.w_filt, self.w_diff):
+            w.param.watch(lambda e: self._show_pre_options(), "value")
         self.b_pre = W.Button(name="Run preprocessing", button_type="primary")
         self.b_pre.on_click(lambda e: self._run_step(2))
         self.fig_pre = pn.pane.Matplotlib(None, tight=True, dpi=90, sizing_mode="stretch_width")
         tab_pre = pn.Column(
-            pn.pane.Markdown("**3. Preprocess** — diffusion moves points towards the cores of the structures; "
-                             "the density filter removes points in sparse regions. The histogram shows how "
-                             "many neighbours points have within the filter radius: the threshold should "
-                             "separate the background peak from the structures."),
-            self.w_pre, self.w_saf_h, self.w_saf_mu, self.w_saf_it, self.w_f_rad, self.w_f_min, self.w_f_mode,
+            pn.pane.Markdown("**3. Preprocess** — a filter removes background points and a diffusion moves the rest "
+                             "towards the cores of the structures. The default pair is the density filter with SAF; "
+                             "LAAT (ants leaving pheromone on aligned structures) and MBMS (mean shift across the "
+                             "local tangent) are the 1-DREAM alternatives, best suited to filaments. LAAT runs before "
+                             "the diffusion, the density filter after it. The figure helps choosing the threshold."),
+            self.w_thin, self.w_thin_rad, self.w_thin_target, pn.layout.Divider(),
+            self.w_filt, self.w_f_rad, self.w_f_min, self.w_f_mode, self.w_la_rad, self.w_la_ants, self.w_la_epochs,
+            self.w_la_steps, self.w_la_kappa, self.w_la_thr, pn.layout.Divider(),
+            self.w_diff, self.w_saf_h, self.w_saf_mu, self.w_saf_it, self.w_mb_rad, self.w_mb_dim, self.w_mb_it,
             self.b_pre, self.fig_pre)
+        self._show_pre_options()
 
         # --- 4 dimensionality
-        self.w_smooth = W.FloatSlider(name="Smoothing radius / r", start=0.0, end=3.0, step=0.1, value=1.0)
+        self.w_smooth = W.FloatSlider(name="Smoothing radius / r", start=0.0, end=5.0, step=0.1, value=1.0)
+        self.w_idx_thin = W.Checkbox(name="Estimate the index on a thinned copy of the data, then carry it to all points",
+                                     value=False)
+        self.w_idx_rad = W.FloatSlider(name="Thinning radius / r (index only)", start=0.2, end=2.0, step=0.05, value=0.6,
+                                       visible=False)
+        self.w_idx_target = W.IntSlider(name="Points per ball to keep (index only)", start=5, end=200, value=30, visible=False)
+        self.w_idx_weight = W.Checkbox(name="Weight neighbours by the inverse of their density", value=False)
+
+        def _idx_opts(e=None):
+            self.w_idx_rad.visible = self.w_idx_target.visible = bool(self.w_idx_thin.value)
+
+        self.w_idx_thin.param.watch(_idx_opts, "value")
         self.b_dim = W.Button(name="Estimate dimensionality", button_type="primary")
         self.b_dim.on_click(lambda e: self._run_step(3))
         self.dim_info = pn.pane.Markdown("")
         self.fig_dim = pn.pane.Matplotlib(None, tight=True, dpi=90, sizing_mode="stretch_width")
         tab_dim = pn.Column(
             pn.pane.Markdown("**4. Dimensionality index** — local PCA in balls of radius *r* gives each diffused "
-                             "point the dimension of the structure it lies on."),
-            self.w_smooth, self.b_dim, self.dim_info, self.fig_dim)
+                             "point the dimension of the structure it lies on. Wider smoothing gives fewer, "
+                             "larger structures; narrower smoothing keeps thin features. Where a dense structure "
+                             "meets a sparse one, the dense one imposes its dimension on the neighbourhoods around "
+                             "the junction: estimating the index on a thinned copy counters that while all points "
+                             "are still used to build the graphs. The inverse-density weighting does the same "
+                             "without discarding points, but can over-correct when the density varies a lot."),
+            self.w_smooth, self.w_idx_thin, self.w_idx_rad, self.w_idx_target, self.w_idx_weight,
+            self.b_dim, self.dim_info, self.fig_dim)
 
         # --- 5 graphs
         self.w_graph = W.Select(name="Method", options={"Manifold crawling": "crawl", "Epsilon-graph (faster)": "epsilon"})
@@ -188,22 +232,61 @@ class App:
         self.w_manifold = W.Select(name="Manifold", options={"All": -1}, value=-1)
         self.w_quantity = W.Select(name="Quantity", options=["curvature"], value="curvature")
         self.fig_explore = pn.pane.Matplotlib(None, tight=True, dpi=90, sizing_mode="stretch_width")
-        self.dl_model = W.FileDownload(callback=self._dl_model, filename="examm_model.pkl", label="Download fitted model",
+        self.dl_model = W.FileDownload(callback=self._dl_model, filename="manydream_model.pkl", label="Download fitted model",
                                        button_type="default")
-        self.dl_script = W.FileDownload(callback=self._dl_script, filename="examm_session.py",
+        self.dl_script = W.FileDownload(callback=self._dl_script, filename="manydream_session.py",
                                         label="Download Python script", button_type="default")
-        self.dl_labels = W.FileDownload(callback=self._dl_labels, filename="examm_labels.csv",
+        self.dl_labels = W.FileDownload(callback=self._dl_labels, filename="manydream_labels.csv",
                                         label="Download per-point results (CSV)", button_type="default")
-        self.dl_summary = W.FileDownload(callback=self._dl_summary, filename="examm_summary.png",
+        self.dl_summary = W.FileDownload(callback=self._dl_summary, filename="manydream_summary.png",
                                          label="Download summary figure", button_type="default")
+        self.dl_skeleton = W.FileDownload(callback=self._dl_skeleton, filename="manydream_skeleton.zip",
+                                          label="Download skeletons: nodes and edges (CSV)", button_type="default")
+        self.dl_member = W.FileDownload(callback=self._dl_membership, filename="manydream_membership.csv",
+                                        label="Download membership probabilities (CSV)", button_type="default")
+        self.dl_viewer = W.FileDownload(callback=self._dl_viewer, filename="manydream_viewer.html",
+                                        label="Download interactive viewer (HTML)", button_type="primary")
         self.w_manifold.param.watch(lambda e: self._guard(self._explore), "value")
         self.w_quantity.param.watch(lambda e: self._guard(self._explore), "value")
+        # the two 1-DREAM views of a filament
+        self.w_sv_vals = W.MultiChoice(name="Quantities (columns of the table)", options=[], value=[], max_items=3)
+        self.w_sv_rmax = W.FloatInput(name="Profile: largest distance from the core", value=0.1, start=1e-12, width=260)
+        self.w_sv_nrad = W.IntSlider(name="Profile: radial bins", start=5, end=40, value=19)
+        self.b_sv_prof = W.Button(name="Bi-dimensional profile", button_type="primary")
+        self.fig_sv_prof = pn.pane.Matplotlib(None, tight=True, dpi=90, sizing_mode="stretch_width")
+        self.w_sv_side = W.FloatInput(name="Frames: side of the plane", value=0.2, start=1e-12, width=260)
+        self.w_sv_up = W.IntSlider(name="Frames: points inserted between centres", start=0, end=10, value=5)
+        self.w_sv_thick = W.FloatInput(name="Frames: half thickness of the slab (0 = automatic)", value=0.0, start=0.0, width=260)
+        self.b_sv_frames = W.Button(name="Co-moving frames", button_type="primary")
+        self.w_sv_frame = W.IntSlider(name="Frame", start=0, end=1, value=0, visible=False)
+        self.fig_sv_frame = pn.pane.Matplotlib(None, tight=True, dpi=80, sizing_mode="stretch_width")
+        self.dl_sv_movie = W.FileDownload(callback=self._dl_frames_movie, filename="comoving_frames.mp4",
+                                          label="Download the frames as a movie", button_type="default", visible=False)
+        self.sv_info = pn.pane.Markdown("")
+        self._sv_frames = None
+        self.b_sv_prof.on_click(lambda e: self._guard(self._sv_profile))
+        self.b_sv_frames.on_click(lambda e: self._guard(self._sv_compute_frames))
+        self.w_sv_frame.param.watch(lambda e: self._guard(self._sv_show_frame), "value_throttled")
+        self.sv_box = pn.Column(
+            pn.pane.Markdown("**Views of a filament (1-DREAM)** — for a 1-D manifold. The *bi-dimensional profile* "
+                             "shows each quantity against the position along the filament and the distance from its "
+                             "core. The *co-moving frames* show the quantities, the point density and the fitted "
+                             "model on a plane perpendicular to the filament, moved along it."),
+            self.w_sv_vals, pn.Row(self.w_sv_rmax, self.w_sv_nrad), self.b_sv_prof,
+            pn.Row(self.w_sv_side, self.w_sv_up), self.w_sv_thick, self.b_sv_frames, self.sv_info, self.dl_sv_movie,
+            pn.pane.Markdown("*The figures appear on the right, above the 3-D view.*"), visible=False)
+        # the figures of the filament views are wide: they go above the 3-D view
+        self.sv_figures = pn.Column(self.fig_sv_prof, self.w_sv_frame, self.fig_sv_frame, sizing_mode="stretch_width", visible=False)
         tab_exp = pn.Column(
             pn.pane.Markdown("**7. Explore & export** — select a manifold to isolate it in the view. For 1-D "
                              "manifolds the quantity is shown along the filament, for higher dimensions on the "
                              "unfolded graph."),
-            self.w_manifold, self.w_quantity, self.fig_explore, pn.layout.Divider(),
-            self.dl_script, self.dl_model, self.dl_labels, self.dl_summary)
+            self.w_manifold, self.w_quantity, self.fig_explore, self.sv_box, pn.layout.Divider(),
+            pn.pane.Markdown("The **interactive viewer** is a single HTML page that opens in any browser, without "
+                             "this app: the data and the structures in 3-D, each structure's unfolded graph, all "
+                             "structures together, outliers by percentile or threshold for several criteria, and "
+                             "the columns you did not model as colours. Building it takes up to a few minutes."),
+            self.dl_viewer, self.dl_script, self.dl_model, self.dl_labels, self.dl_member, self.dl_skeleton, self.dl_summary)
 
         self.tabs = pn.Tabs(*[(f"{k + 1}. {n}", t) for k, (n, t) in enumerate(zip(
             STEPS, [tab_data, tab_feat, tab_pre, tab_dim, tab_graph, tab_agtm, tab_exp]))],
@@ -222,10 +305,10 @@ class App:
         for w in (self.w_az, self.w_el, self.w_zoom):
             w.param.watch(lambda e: self._guard(self.refresh_view), "value_throttled")
         self.cam_row = pn.Row(self.w_az, self.w_el, self.w_zoom, visible=self.backend == "pyvista")
-        right = pn.Column(pn.Row(pn.pane.Markdown("**Layers**"), self.w_layers), self.cam_row, self.view_holder,
+        right = pn.Column(pn.Row(pn.pane.Markdown("**Layers**"), self.w_layers), self.cam_row, self.sv_figures, self.view_holder,
                           self.backend_note, self.summary, sizing_mode="stretch_width")
         self.root = pn.Column(
-            pn.Row(pn.pane.Markdown("## examm — noisy multi-manifold learning"), pn.Spacer(), self.spinner),
+            pn.Row(pn.pane.Markdown("## MANY-DREAM — noisy multi-manifold learning"), pn.Spacer(), self.spinner),
             self.status, self.alert, pn.Row(self.tabs, right, sizing_mode="stretch_width"),
             sizing_mode="stretch_width")
         self._update_status()
@@ -245,7 +328,7 @@ class App:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 out = fn(*a)
-            notes = [str(w.message) for w in caught if issubclass(w.category, examm.DegenerateModelWarning)]
+            notes = [str(w.message) for w in caught if issubclass(w.category, manydream.DegenerateModelWarning)]
             if notes and self.alert.alert_type != "danger":
                 self._say(self.alert.object + "<br>Note: " + " | ".join(dict.fromkeys(notes)), "warning")
             return out
@@ -311,7 +394,7 @@ class App:
         path = Path(self.w_path.value.strip()).expanduser()
         if not path.is_file():
             raise FileNotFoundError(f"no such file: {path}")
-        A, names = examm.io.load_table(path)
+        A, names = manydream.io.load_table(path)
         self._set_table(A, names, path.name)
 
     def _load_upload(self):
@@ -321,7 +404,7 @@ class App:
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
             fh.write(self.w_upload.value)
         try:
-            A, names = examm.io.load_table(fh.name)
+            A, names = manydream.io.load_table(fh.name)
         finally:
             Path(fh.name).unlink(missing_ok=True)
         self._set_table(A, names, self.w_upload.filename or "upload")
@@ -345,7 +428,7 @@ class App:
         self.feature_names = feats
         if r is None:
             r = suggest_radius(self.X)
-        self.learner = examm.MultiManifoldLearner(r=r, random_state=0).set_data(self.X)
+        self.learner = manydream.MultiManifoldLearner(r=r, random_state=0).set_data(self.X)
         self._r_silent = True
         self.w_r.value = r
         self.w_r.step = float(f"{r / 10:.1g}")
@@ -377,11 +460,51 @@ class App:
             self._guard(self.refresh_view)
 
     # ------------------------------------------------------------------ pipeline
+    def _show_pre_options(self):
+        on = {"thin": bool(self.w_thin.value), "saf": self.w_diff.value == "saf", "mbms": self.w_diff.value == "mbms",
+              "density": self.w_filt.value == "density", "laat": self.w_filt.value == "laat"}
+        for key, widgets in self._pre_groups.items():
+            for w in widgets:
+                w.visible = on[key]
+
+    def _steps(self, thin):
+        """Preprocessing steps as (object, code) pairs; ``thin`` is None or (radius factor, target)."""
+        code = lambda cls, kw: cls.__name__ + "(" + ", ".join(f"{k}={v!r}" for k, v in kw.items()) + ")"  # noqa: E731
+        out = []
+
+        def add(cls, **kw):
+            out.append((cls(**kw), code(cls, kw)))
+
+        if thin is not None:
+            add(DensityThin, radius_factor=thin[0], target=thin[1], random_state=0)
+        if self.w_filt.value == "laat":
+            add(LAAT, radius_factor=self.w_la_rad.value, n_ants=self.w_la_ants.value, n_epochs=self.w_la_epochs.value,
+                n_steps=self.w_la_steps.value, kappa=self.w_la_kappa.value,
+                threshold=self.w_la_thr.value if self.w_la_thr.value > 0 else "otsu")
+        if self.w_diff.value == "saf":
+            add(SAF, radius_factor=self.w_saf_h.value, mu=self.w_saf_mu.value, n_iter=self.w_saf_it.value)
+        elif self.w_diff.value == "mbms":
+            add(MBMS, radius_factor=self.w_mb_rad.value, dim=self.w_mb_dim.value, n_iter=self.w_mb_it.value)
+        if self.w_filt.value == "density":
+            add(DensityFilter, radius_factor=self.w_f_rad.value, min_points=self.w_f_min.value, mode=self.w_f_mode.value)
+        return out
+
+    @staticmethod
+    def _as_spec(steps):
+        return None if not steps else (steps[0][0] if len(steps) == 1 else Pipeline([s for s, _ in steps]))
+
+    @staticmethod
+    def _as_code(steps):
+        return "None" if not steps else (steps[0][1] if len(steps) == 1 else "Pipeline([" + ", ".join(c for _, c in steps) + "])")
+
+    def _main_steps(self):
+        return self._steps((self.w_thin_rad.value, self.w_thin_target.value) if self.w_thin.value else None)
+
+    def _index_steps(self):
+        return self._steps((self.w_idx_rad.value, self.w_idx_target.value)) if self.w_idx_thin.value else []
+
     def _preprocess_spec(self):
-        saf = SAF(radius_factor=self.w_saf_h.value, mu=self.w_saf_mu.value, n_iter=self.w_saf_it.value)
-        flt = DensityFilter(radius_factor=self.w_f_rad.value, min_points=self.w_f_min.value, mode=self.w_f_mode.value)
-        return {"SAF diffusion + density filter": Pipeline([saf, flt]), "SAF diffusion only": saf,
-                "Density filter only": flt, "None": None}[self.w_pre.value]
+        return self._as_spec(self._main_steps())
 
     def _params(self) -> dict:
         zb = None
@@ -389,6 +512,7 @@ class App:
             zb = (self.w_zlo.value if self.w_zlo.value > 0 else 0.0, self.w_zhi.value if self.w_zhi.value > 0 else np.inf)
         return dict(
             r=float(self.w_r.value), preprocess=self._preprocess_spec(), smooth_factor=self.w_smooth.value,
+            index_preprocess=self._as_spec(self._index_steps()), index_density_weight=bool(self.w_idx_weight.value),
             graph=self.w_graph.value, dims=sorted(int(j) for j in self.w_dims.value), eta=self.w_eta.value,
             beta=self.w_beta.value, min_nodes=self.w_minnodes.value or None, epsilon=self.w_eps.value,
             background=self.w_bg.value,
@@ -455,8 +579,20 @@ class App:
 
         L = self.learner
         if step == 2:
-            rad = self.w_f_rad.value * L.r
-            self._fig(self.fig_pre, viz.plot_density_counts(self.X, rad, self.w_f_min.value))
+            if self.w_filt.value == "density":
+                self._fig(self.fig_pre, viz.plot_density_counts(self.X, self.w_f_rad.value * L.r, self.w_f_min.value))
+            elif self.w_filt.value == "laat" and "laat_pheromone_all" in L.preprocess_.info:
+                import matplotlib.pyplot as plt
+
+                F, thr = L.preprocess_.info["laat_pheromone_all"], L.preprocess_.info["laat_threshold"]
+                fig, ax = plt.subplots(figsize=(5.5, 3.6))
+                ax.hist(np.log10(F), bins=80, color=viz.CATEGORICAL[0], edgecolor="white", linewidth=0.2)
+                ax.axvline(np.log10(thr), color="#0b0b0b", linewidth=1, linestyle="--")
+                ax.set(xlabel="log10 pheromone on a point", ylabel="points", title=f"kept: pheromone above {thr:.3g}")
+                ax.spines[["top", "right"]].set_visible(False)
+                self._fig(self.fig_pre, fig)
+            else:
+                self.fig_pre.object = None
         elif step == 3:
             c = L.dim_result_.counts_per_dim()
             self.dim_info.object = " | ".join(f"**{k}-D**: {v:,}" if k else f"undetermined: {v:,}" for k, v in sorted(c.items()))
@@ -489,6 +625,17 @@ class App:
             return
         k = self.w_manifold.value
         self.refresh_view()
+        is_curve = k is not None and k >= 0 and L.manifolds_[k].dim == 1 and L.manifolds_[k].agtm is not None
+        if self.sv_box.visible != is_curve or getattr(self, "_sv_for", None) != k:
+            self.sv_box.visible, self._sv_for, self._sv_frames = is_curve, k, None
+            self.fig_sv_prof.object = self.fig_sv_frame.object = None
+            self.w_sv_frame.visible = self.dl_sv_movie.visible = self.sv_figures.visible = False
+            self.sv_info.object = ""
+            if is_curve:
+                passive = [c for c in self.columns if c not in self.feature_names]
+                self.w_sv_vals.options = list(self.columns)
+                self.w_sv_vals.value = (passive or list(self.feature_names))[:2]
+                self.w_sv_rmax.value, self.w_sv_side.value = float(L.r), 2.0 * float(L.r)
         if k is None or k < 0:
             self._fig(self.fig_explore, viz.plot_loglik(L, figsize=(6, 3.4)))
             return
@@ -505,6 +652,55 @@ class App:
         else:
             fig = viz.plot_unfolded(m, node_values=m.agtm.node_means(self.X, vals), label=q, figsize=(5.5, 4.6))
         self._fig(self.fig_explore, fig)
+
+    # ------------------------------------------------------------------ views of a filament
+    def _sv_target(self):
+        L = self._need_fit()
+        k = self.w_manifold.value
+        if k is None or k < 0 or L.manifolds_[k].dim != 1 or L.manifolds_[k].agtm is None:
+            raise ValueError("select a fitted 1-D manifold first")
+        return L.manifolds_[k], {c: self.table[:, self.columns.index(c)] for c in self.w_sv_vals.value}
+
+    def _sv_profile(self):
+        from manydream import streamviz as sv
+
+        m, vals = self._sv_target()
+        res = sv.bidimensional_profile(m, self.X, vals, r_max=float(self.w_sv_rmax.value), n_radial=int(self.w_sv_nrad.value))
+        self._fig(self.fig_sv_prof, sv.plot_bidimensional_profile(res, figsize=(11, 1.6 * (len(vals) + 1) + 0.7)))
+        self.sv_figures.visible = True
+        self._say("Bi-dimensional profile: position along the filament against distance from its core.", "success")
+
+    def _sv_compute_frames(self):
+        from manydream import streamviz as sv
+
+        m, vals = self._sv_target()
+        self._sv_frames = sv.comoving_frames(m, self.X, vals, side=float(self.w_sv_side.value), upsample=int(self.w_sv_up.value),
+                                             half_thickness=float(self.w_sv_thick.value) or None)
+        n = len(self._sv_frames["centers"])
+        self.w_sv_frame.param.update(start=0, end=n - 1, value=n // 2, visible=True)
+        self.dl_sv_movie.visible = self.sv_figures.visible = True
+        pts = self._sv_frames["n_points"]
+        self.sv_info.object = (f"{n} frames; points on a plane: median {int(np.median(pts))}, fewest {int(pts.min())}."
+                               + (" Few points per plane: increase the half thickness." if np.median(pts) < 20 else ""))
+        self._sv_show_frame()
+        self._say(f"Computed {n} co-moving frames; move the slider to walk along the filament.", "success")
+
+    def _sv_show_frame(self):
+        from manydream import streamviz as sv
+
+        if self._sv_frames is None:
+            return
+        self._fig(self.fig_sv_frame, sv.plot_comoving_frame(self._sv_frames, int(self.w_sv_frame.value), self.X))
+
+    def _dl_frames_movie(self):
+        from manydream import streamviz as sv
+
+        if self._sv_frames is None:
+            raise ValueError("compute the co-moving frames first")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = sv.animate_comoving_frames(self._sv_frames, Path(tmp) / "frames.mp4", self.X)
+            self.dl_sv_movie.filename = "comoving_frames" + out.suffix
+            return io.BytesIO(out.read_bytes())
 
     # ------------------------------------------------------------------ 3-D view
     def _view(self):
@@ -599,6 +795,49 @@ class App:
                    delimiter=",", header=head, comments="", fmt=["%d"] * 4 + ["%.10g"] * len(self.feature_names))
         return io.BytesIO(buf.getvalue().encode())
 
+    def _dl_viewer(self):
+        """Standalone HTML viewer of the session: one global model built on the graphs that were found."""
+        from manydream.hierarchy import HierarchicalAGTM
+        from manydream.viewer import export_viewer
+
+        L = self._need_fit()
+        graphs = [g for gs in L.graphs_.values() for g in gs]
+        if not graphs:
+            raise ValueError("no graphs were found; nothing to show")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            H = HierarchicalAGTM(background=max(float(self.w_bg.value), 0.01),
+                                 agtm_params=self._params()["agtm_params"]).set_data(self.X)
+            H.add_children(graphs)
+        H.detections_ = [{"level": 2, "parent": "root", "r": float(L.r), "learner": L, "region": np.arange(len(self.X))}]
+        extra = {c: self.table[:, k] for k, c in enumerate(self.columns) if c not in self.feature_names}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = export_viewer(Path(tmp) / "viewer.html", self.X, {"GUI session": H}, names=self.feature_names,
+                                title="MANY-DREAM viewer", extra=extra)
+            return io.BytesIO(out.read_bytes())
+
+    def _dl_skeleton(self):
+        """Zip with the nodes and the edges of every fitted structure."""
+        import zipfile
+
+        from manydream import results
+
+        L = self._need_fit()
+        buf = io.BytesIO()
+        with tempfile.TemporaryDirectory() as tmp, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in results.save_skeleton(L, Path(tmp) / "skeleton"):
+                z.write(f, f.name)
+        buf.seek(0)
+        return buf
+
+    def _dl_membership(self):
+        """Per point: probability of each structure and of the background."""
+        from manydream import results
+
+        L = self._need_fit()
+        with tempfile.TemporaryDirectory() as tmp:
+            return io.BytesIO(results.save_membership(L, Path(tmp) / "m.csv").read_bytes())
+
     def _dl_summary(self):
         import matplotlib.pyplot as plt
 
@@ -615,36 +854,34 @@ class App:
         """Python script reproducing the current session."""
         p = self._params()
         feats = self.feature_names
-        pre = {"SAF diffusion + density filter": "Pipeline([saf, density])", "SAF diffusion only": "saf",
-               "Density filter only": "density", "None": "None"}[self.w_pre.value]
+        pre, idx = self._as_code(self._main_steps()), self._as_code(self._index_steps())
         if self.source in EXAMPLES:
             fn = {"Three interlocked toroids (3-D)": "make_three_toroids(scale=0.6, random_state=0)",
                   "Mixed manifolds D1 (3-D)": "make_d1(random_state=0)",
                   "Three filaments (3-D)": "make_filaments(random_state=0)",
                   "3-torus (4-D)": "make_torus3(random_state=0)"}[self.source]
-            load = f"table = examm.datasets.{fn}.X\ncolumns = {self.columns!r}"
+            load = f"table = manydream.datasets.{fn}.X\ncolumns = {self.columns!r}"
         else:
-            load = f"table, columns = examm.io.load_table({self.source!r})  # adjust the path"
+            load = f"table, columns = manydream.io.load_table({self.source!r})  # adjust the path"
         lines = [
-            "# Generated by examm-gui: reproduces the session.", "import numpy as np", "import examm",
-            "from examm.preprocess import SAF, DensityFilter, Pipeline", "", load,
+            "# Generated by manydream-gui: reproduces the session.", "import numpy as np", "import manydream",
+            "from manydream.preprocess import LAAT, MBMS, SAF, DensityFilter, DensityThin, Pipeline", "", load,
             f"features = {feats!r}", "X = table[:, [columns.index(f) for f in features]]",
         ]
         if self.w_standardise.value:
             lines.append("X = (X - X.mean(0)) / X.std(0)")
         lines += [
-            "", f"saf = SAF(radius_factor={self.w_saf_h.value}, mu={self.w_saf_mu.value}, n_iter={self.w_saf_it.value})",
-            f"density = DensityFilter(radius_factor={self.w_f_rad.value}, min_points={self.w_f_min.value}, "
-            f"mode={self.w_f_mode.value!r})", "",
-            "learner = examm.MultiManifoldLearner(",
-            f"    r={p['r']!r}, preprocess={pre}, smooth_factor={p['smooth_factor']!r},",
+            "", f"preprocess = {pre}", f"index_preprocess = {idx}      # where the dimensionality index is estimated", "",
+            "learner = manydream.MultiManifoldLearner(",
+            f"    r={p['r']!r}, preprocess=preprocess, smooth_factor={p['smooth_factor']!r},",
+            f"    index_preprocess=index_preprocess, index_density_weight={p['index_density_weight']!r},",
             f"    graph={p['graph']!r}, dims={p['dims']!r}, eta={p['eta']!r}, beta={p['beta']!r}, "
             f"min_nodes={p['min_nodes']!r},",
             f"    epsilon={p['epsilon']!r}, background={p['background']!r},",
             f"    agtm_params={p['agtm_params']!r},".replace("inf", "np.inf"),
             "    random_state=0,", ").fit(X)", "", "print(learner.summary())",
             "# learner.manifolds_, learner.dim_index_, learner.labels_, learner.score_samples(X) ...",
-            "# import examm.viz as viz; viz.plot_summary(learner).savefig('summary.png', dpi=150)", "",
+            "# import manydream.viz as viz; viz.plot_summary(learner).savefig('summary.png', dpi=150)", "",
         ]
         return "\n".join(lines)
 
@@ -663,7 +900,7 @@ def create_app(path: str | None = None, backend: str = "plotly", max_display: in
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="examm-gui", description="Step-by-step GUI for examm (opens in the browser).")
+    parser = argparse.ArgumentParser(prog="manydream-gui", description="Step-by-step GUI for MANY-DREAM (opens in the browser).")
     parser.add_argument("file", nargs="?", help="table to load at start (csv, txt, npy, npz, h5, fits)")
     parser.add_argument("--port", type=int, default=5006)
     parser.add_argument("--address", default="localhost", help="address to listen on (default: localhost only)")
@@ -676,14 +913,14 @@ def main(argv=None):
     try:
         import panel as pn
     except ImportError as exc:  # pragma: no cover
-        raise SystemExit("The GUI needs extra packages: pip install 'examm[gui]'") from exc
+        raise SystemExit("The GUI needs extra packages: pip install 'manydream[gui]'") from exc
     if args.backend == "pyvista" and not pyvista_available():
         raise SystemExit("PyVista cannot render off-screen on this machine; install an OpenGL library "
                          "(e.g. sudo apt install libosmesa6) or use the default --backend plotly")
     pn.extension("plotly")
-    print(f"examm-gui: http://{args.address}:{args.port}  (Ctrl+C to stop)")
+    print(f"manydream-gui: http://{args.address}:{args.port}  (Ctrl+C to stop)")
     pn.serve(lambda: create_app(args.file, args.backend, args.max_display), port=args.port, address=args.address,
-             show=not args.no_browser, title="examm", websocket_origin="*" if args.address != "localhost" else None,
+             show=not args.no_browser, title="MANY-DREAM", websocket_origin="*" if args.address != "localhost" else None,
              threaded=False)
 
 

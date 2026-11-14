@@ -1,7 +1,9 @@
-# examm
+# MANY-DREAM
 
-Python package (C++ core) for **detecting and modelling noisy manifolds of different
-dimensions in a point cloud**, after
+MANY-DREAM (Python package `manydream`, C++ core) **detects and models noisy manifolds of different
+dimensions in a point cloud**: filaments, surfaces and volumes. It extends the 1-DREAM methodology
+for one-dimensional structures (Canducci et al., *1-DREAM: 1D Recovery, Extraction and Analysis of
+Manifolds in noisy environments*, Astronomy and Computing 41, 2022) to manifolds of any dimension, after
 
 > M. Canducci, P. Tiňo, M. Mastropietro, *Probabilistic modelling of general noisy
 > multi-manifold data sets*, Artificial Intelligence 302 (2022) 103579.
@@ -9,6 +11,9 @@ dimensions in a point cloud**, after
 It works for any ambient dimension `d` and any intrinsic dimension `j <= d`. The MATLAB code in
 the parent folder is the original implementation; this package is a redesign of it, not a
 line-by-line translation (see [Differences from the paper and the MATLAB code](#differences-from-the-paper-and-the-matlab-code)).
+It is not the 1-DREAM toolbox itself: the filament case uses the same sequence of methods, with LAAT and
+MBMS re-implemented here (see [LAAT and MBMS](#laat-and-mbms-the-1-dream-preprocessing)). The package was
+called `examm` before version 0.2; models saved under that name still load.
 
 ![Pipeline on the paper's mixed-manifold data set](docs/img/summary_d1.png)
 
@@ -22,15 +27,15 @@ Building from source needs a C++17 compiler and CMake (on Ubuntu / WSL: `sudo ap
 build-essential cmake`). Prebuilt manylinux wheels are produced by the `wheels` GitHub workflow
 and attached to releases; with a wheel no compiler is needed.
 
-Core dependencies are NumPy and SciPy only. Extras: `examm[viz]` (matplotlib figures),
-`examm[gui]` (browser GUI), `examm[io]` (HDF5 and FITS tables).
+Core dependencies are NumPy and SciPy only. Extras: `manydream[viz]` (matplotlib figures),
+`manydream[gui]` (browser GUI), `manydream[io]` (HDF5 and FITS tables).
 
 ## Quick start
 
 ```python
-import examm
+import manydream
 
-learner = examm.MultiManifoldLearner(r=0.1, random_state=0).fit(X)   # X: (n_points, n_features)
+learner = manydream.MultiManifoldLearner(r=0.1, random_state=0).fit(X)   # X: (n_points, n_features)
 print(learner.summary())
 
 learner.dim_index_        # dimensionality index of every point (0 = removed as noise / undetermined)
@@ -41,8 +46,11 @@ learner.predict(X)        # most probable manifold
 ```
 
 `r`, the **characteristic scale**, is the only required parameter: the radius of the local
-neighbourhoods. It must be larger than the thickness of the noise around the structures and
-smaller than the distance between separate structures.
+neighbourhoods. It is the physical size at which a structure is locally linear, that is, the
+scale at which it can be approximated by a flat patch of its own dimension (a segment for a
+curve, a piece of plane for a surface). It expresses what you consider one structure in your
+data. It has to be larger than the noise across the structures, and small enough that a
+neighbourhood does not span their curvature or two separate structures.
 
 Every intermediate result is kept, and changing a parameter recomputes only what depends on it:
 
@@ -58,17 +66,17 @@ Each stage can also be used on its own.
 
 | Stage | Function / class | What it does |
 |---|---|---|
-| Preprocess | `examm.SAF`, `examm.DensityFilter`, `examm.DensityThin`, `examm.LAAT`, `examm.MBMS`, `examm.Pipeline` | Diffuses points towards the cores of the structures and removes points in sparse regions. `DensityThin` optionally thins over-dense regions first, for data whose density spans orders of magnitude. `LAAT` and `MBMS` are the 1-DREAM alternatives for filtering and diffusion (see below). Returns row-aligned *noisy* and *diffused* point sets. |
-| Dimensionality index | `examm.dimensionality_index` | Local PCA; the normalised spectrum is compared with the ideal spectra on the probability simplex (Fisher metric), then smoothed spatially. |
-| Graphs | `examm.multi_manifold_crawl`, `examm.crawl`, `examm.epsilon_graph` | Manifold crawling builds a graph skeleton of every manifold of a given dimension; the epsilon-graph is the faster, less stable alternative of the paper's section 4.3. |
-| Density model | `examm.AGTM`, `examm.MultiManifoldModel` | Abstract GTM: manifold-aligned Gaussian mixture on each graph, trained by EM; all models combine into one hierarchical mixture. Also gives curvature along graph edges and node-wise means of any per-point quantity. |
+| Preprocess | `manydream.SAF`, `manydream.DensityFilter`, `manydream.DensityThin`, `manydream.LAAT`, `manydream.MBMS`, `manydream.Pipeline` | Diffuses points towards the cores of the structures and removes points in sparse regions. `DensityThin` optionally thins over-dense regions first, for data whose density spans orders of magnitude. `LAAT` and `MBMS` are the 1-DREAM alternatives for filtering and diffusion (see below). Returns row-aligned *noisy* and *diffused* point sets. |
+| Dimensionality index | `manydream.dimensionality_index` | Local PCA; the normalised spectrum is compared with the ideal spectra on the probability simplex (Fisher metric), then smoothed spatially. |
+| Graphs | `manydream.multi_manifold_crawl`, `manydream.crawl`, `manydream.epsilon_graph` | Manifold crawling builds a graph skeleton of every manifold of a given dimension; the epsilon-graph is the faster, less stable alternative of the paper's section 4.3. |
+| Density model | `manydream.AGTM`, `manydream.MultiManifoldModel` | Abstract GTM: manifold-aligned Gaussian mixture on each graph, trained by EM; all models combine into one hierarchical mixture. Also gives curvature along graph edges and node-wise means of any per-point quantity. |
 
 ```python
-pre    = examm.Pipeline([examm.SAF(), examm.DensityFilter()]).fit_transform(X, r)
-dim    = examm.dimensionality_index(pre.diffused, r)
+pre    = manydream.Pipeline([manydream.SAF(), manydream.DensityFilter()]).fit_transform(X, r)
+dim    = manydream.dimensionality_index(pre.diffused, r)
 sel    = dim.index == 2
-graphs = examm.multi_manifold_crawl(pre.diffused[sel], r, dim=2, noisy=pre.noisy[sel], random_state=0)
-model  = examm.AGTM(graphs[0]).fit(pre.noisy[sel][graphs[0].points])
+graphs = manydream.multi_manifold_crawl(pre.diffused[sel], r, dim=2, noisy=pre.noisy[sel], random_state=0)
+model  = manydream.AGTM(graphs[0]).fit(pre.noisy[sel][graphs[0].points])
 model.edge_curvature(); model.score_samples(X); model.node_means(X, some_quantity)
 ```
 
@@ -77,15 +85,15 @@ model.edge_curvature(); model.score_samples(X); model.node_means(X, some_quantit
 The filtering and diffusion steps of 1-DREAM can replace the default ones:
 
 ```python
-pre = examm.Pipeline([examm.LAAT(), examm.MBMS(dim=1)])        # or preprocess="laat+mbms"
-learner = examm.MultiManifoldLearner(r=0.5, preprocess=pre, dims=[1]).fit(X)
+pre = manydream.Pipeline([manydream.LAAT(), manydream.MBMS(dim=1)])        # or preprocess="laat+mbms"
+learner = manydream.MultiManifoldLearner(r=0.5, preprocess=pre, dims=[1]).fit(X)
 learner.preprocess_.info["laat_pheromone_all"]                 # pheromone of every input point
 ```
 
 | Step | Replaces | What it does | When to prefer it |
 |---|---|---|---|
-| `examm.LAAT` | `DensityFilter` | Ants walk between neighbouring points, preferring jumps aligned with the local principal directions and points that already carry pheromone; points that collect little pheromone are removed (Taghribi et al. 2022). | Filaments and other elongated structures in a background that is dense in places: it selects aligned structures, not merely dense ones. |
-| `examm.MBMS` | `SAF` | Moves every point towards the weighted mean of its neighbours, only across the local tangent space of dimension `dim` (Wang & Carreira-Perpinan 2010). | Structures of one known intrinsic dimension (`dim=1` for filaments). `SAF` needs no `dim` and is the better choice for data with manifolds of several dimensions. |
+| `manydream.LAAT` | `DensityFilter` | Ants walk between neighbouring points, preferring jumps aligned with the local principal directions and points that already carry pheromone; points that collect little pheromone are removed (Taghribi et al. 2022). | Filaments and other elongated structures in a background that is dense in places: it selects aligned structures, not merely dense ones. |
+| `manydream.MBMS` | `SAF` | Moves every point towards the weighted mean of its neighbours, only across the local tangent space of dimension `dim` (Wang & Carreira-Perpinan 2010). | Structures of one known intrinsic dimension (`dim=1` for filaments). `SAF` needs no `dim` and is the better choice for data with manifolds of several dimensions. |
 
 The two can be mixed with the default steps (for example `[LAAT(), SAF()]`), and they work in any
 ambient dimension. Points to keep in mind:
@@ -107,7 +115,7 @@ ambient dimension. Points to keep in mind:
 Your own denoiser fits in by implementing one method:
 
 ```python
-from examm.preprocess import Preprocessor
+from manydream.preprocess import Preprocessor
 
 class MyDenoiser(Preprocessor):
     def apply(self, state, r):
@@ -115,11 +123,11 @@ class MyDenoiser(Preprocessor):
         moved = ...                       # new positions of the kept points, same shape
         return state.select(keep).with_diffused(moved)
 
-examm.MultiManifoldLearner(r=0.1, preprocess=[MyDenoiser(), examm.DensityFilter()]).fit(X)
+manydream.MultiManifoldLearner(r=0.1, preprocess=[MyDenoiser(), manydream.DensityFilter()]).fit(X)
 ```
 
-Steps can be registered by name with `examm.preprocess.register` or through the
-`examm.preprocessors` entry-point group of an installed package.
+Steps can be registered by name with `manydream.preprocess.register` or through the
+`manydream.preprocessors` entry-point group of an installed package.
 
 ### Main parameters
 
@@ -127,7 +135,7 @@ Steps can be registered by name with `examm.preprocess.register` or through the
 |---|---|---|
 | `r` | – | Characteristic scale (see above). |
 | `SAF(radius_factor, mu, n_iter)` | 0.3, 0.3, 10 | Diffusion kernel scale `h = radius_factor * r`, repulsion weight, iterations. `h` should be close to the noise thickness. |
-| `DensityFilter(radius_factor, min_points)` | 0.5, 6 | A point is kept if its ball of radius `radius_factor * r` holds at least `min_points` points in both the noisy and the diffused set. `min_points` must separate background from structure; `examm.viz.plot_density_counts` shows the histogram to choose it from. |
+| `DensityFilter(radius_factor, min_points)` | 0.5, 6 | A point is kept if its ball of radius `radius_factor * r` holds at least `min_points` points in both the noisy and the diffused set. `min_points` must separate background from structure; `manydream.viz.plot_density_counts` shows the histogram to choose it from. |
 | `smooth_factor` | 1.0 | Spatial smoothing radius of the dimensionality index, in units of `r`. |
 | `eta`, `beta` | 0.75, 0.4 | Crawling step size and merge tolerance, in units of `r`. |
 | `min_nodes` | `4 j + 4` | Smaller graphs are discarded. |
@@ -136,7 +144,7 @@ Steps can be registered by name with `examm.preprocess.register` or through the
 
 ### Hierarchical model and outliers
 
-`examm.HierarchicalAGTM` organises AGTMs in a tree and trains it top-down with the EM scheme of
+`manydream.HierarchicalAGTM` organises AGTMs in a tree and trains it top-down with the EM scheme of
 Tiňo and Nabney's Hierarchical GTM (IEEE TPAMI 24(5), 2002): the children of a trained model are
 fitted on all points, each weighted by the parent's responsibility for it, siblings compete for
 points, and every model carries a parent-conditional mixing coefficient. Two optional additions
@@ -144,7 +152,7 @@ to the paper: each internal node keeps its own model as a *residual* leaf (point
 that none of its sub-structures explains), and a uniform *background* leaf sits under the root.
 
 ```python
-H = examm.build_hierarchy(X, radii=[0.8, 0.4], background=0.01)   # coarse to fine
+H = manydream.build_hierarchy(X, radii=[0.8, 0.4], background=0.01)   # coarse to fine
 print(H.summary())
 H.score_samples(X)                 # log density (mixture of the leaves)
 H.outliers(X, alpha=1e-3)          # below the 0.1 % quantile of what the structures themselves generate
@@ -184,7 +192,7 @@ the iteration of each event are in `model.diagnostics_`. `zeta_bounds=(lo, hi)` 
 
 ## Visualisation
 
-`examm.viz` (matplotlib) has one figure per stage, each returning a `Figure`:
+`manydream.viz` (matplotlib) has one figure per stage, each returning a `Figure`:
 
 `plot_data`, `plot_preprocess`, `plot_density_counts`, `plot_dim_index`, `plot_simplex`,
 `plot_confusion`, `plot_graphs`, `plot_crawl_progress`, `plot_unfolded`, `plot_agtm`,
@@ -199,7 +207,7 @@ Data with more than three features are shown with `axes=(i, j, k)` (feature indi
 ### Interactive viewer
 
 ```python
-from examm.viewer import export_viewer
+from manydream.viewer import export_viewer
 export_viewer("viewer.html", X, {"run A": H_a, "run B": H_b}, names=feature_names,
               extra={"redshift": z, "class": labels})          # extra is optional
 ```
@@ -228,11 +236,62 @@ again; `examples/05_viewer_for_your_data.py` does both from the command line.
   passed as `extra=` or loaded later in the page from a CSV (one line per point in the original
   order, or with a `row` column holding the point index). A loaded file stays in the browser.
 
+## Using the results: skeletons, membership, validation
+
+```python
+from manydream import results
+
+results.save_skeleton(learner, "run1")            # run1_nodes.csv and run1_edges.csv
+m = results.membership(learner)                   # per point: P(each structure), P(background)
+clean = X[m["on_structure"] > 0.5]                # noise cleaning
+results.save_membership(learner, "run1_membership.csv")
+
+report = results.validate(m["structure"], truth, names)   # truth: 0 = noise, k = k-th manifold
+print(report)
+```
+
+| Function | What it gives |
+|---|---|
+| `skeleton`, `save_skeleton` | The nodes and edges of every fitted structure (positions after training, on the mean curve or surface). |
+| `membership`, `save_membership` | For every point, the probability of belonging to each structure or to the uniform background, and the most probable one. |
+| `validate` | Against known labels: true and false positives and negatives for noise against structure, with precision and recall; and for each true manifold its best-matching structure, recall, purity and the number of pieces it was split into. |
+
+The GUI's last step offers the skeleton and the membership table as downloads.
+
+## Views of one-dimensional manifolds (1-DREAM)
+
+`manydream.streamviz` implements the two visualisation techniques of the 1-DREAM paper (Canducci et al.
+2022, section 4) for quantities carried by the points of a filament or stream. Both use the fitted
+1-D model (the stream GTM) for the curve and its tangents.
+
+```python
+from manydream import streamviz as sv
+
+m = learner.manifolds_[0]                                   # a 1-D manifold
+values = {"temperature": T, "density": rho}                 # one value per point of X
+
+prof = sv.bidimensional_profile(m, X, values, r_max=0.5, n_radial=19)
+sv.plot_bidimensional_profile(prof)                         # along the manifold x distance from its core
+
+frames = sv.comoving_frames(m, X, values, side=1.0)         # planes perpendicular to a refined spine
+sv.plot_comoving_frame(frames, 40, X)                       # one frame
+sv.animate_comoving_frames(frames, "stream.mp4", X)         # the movie
+```
+
+| View | What it shows | Parameters (paper's symbols) |
+|---|---|---|
+| Bi-dimensional profile | The mean of each quantity in cylindrical shells around every segment of the curve, as one image: position along the manifold against distance from its core. | `r_max` (r_M), `n_radial` (c) |
+| Co-moving orthonormal frames | A plane perpendicular to the curve, with a pair of axes that stays consistent along it, moved along a refined spine; on each plane the quantities, the point density and the density of the fitted model are mapped on a grid. | `side` (a), `n_pixels` (M = 25), `upsample` (N = 5), `depth` (b) |
+
+Means are Gaussian-weighted; the SPH weights of the paper are not implemented. In 3-D the in-plane
+axes are those of the paper (eq. 55-56); in other dimensions a basis carried along the curve is used.
+With sparse data, increase `half_thickness` so that every plane holds enough points.
+
 ## GUI
 
 ```bash
 pip install "./python[gui]"
-examm-gui                 # or: examm-gui mydata.csv
+manydream-gui                 # or: manydream-gui mydata.csv
 ```
 
 The GUI opens in the browser and walks through the methodology: **Data → Features → Preprocess →
@@ -240,14 +299,24 @@ Dimensionality → Graphs → AGTM → Explore & export**. Each step has its par
 key numbers and a diagnostic figure; the 3-D view shows the layers of all completed steps
 together (raw data, kept and diffused points, dimensionality index, graphs, attached points,
 fitted models, the scale `r`). Changing a parameter marks the later steps as to be redone. The
-last step exports the fitted model, per-point results, a summary figure and a Python script that
-reproduces the session.
+last step exports the fitted model, per-point results, a summary figure, a Python script that
+reproduces the session, and the standalone interactive viewer (one HTML page with the 3-D data view,
+each structure's unfolded graph, all structures together and the outlier criteria).
+
+The steps expose the same choices as the library:
+
+- **Preprocess**: optional thinning of over-dense regions; the filter (density filter or LAAT) and the
+  diffusion (SAF or MBMS) are chosen separately, so the default pair and the 1-DREAM pair can be mixed.
+- **Dimensionality**: smoothing width, estimating the index on a thinned copy of the data
+  (`index_preprocess`), and the inverse-density weighting (`index_density_weight`).
+- **Explore**: for a 1-D manifold, the two 1-DREAM views (`manydream.streamviz`): the bi-dimensional profile,
+  and the co-moving frames with a slider to walk along the filament and a movie download.
 
 Because it runs in the browser it needs no X server under WSL, and it can be used on a remote
-machine through an SSH port forward (`ssh -L 5006:localhost:5006 host`, then `examm-gui
+machine through an SSH port forward (`ssh -L 5006:localhost:5006 host`, then `manydream-gui
 --no-browser` on the host).
 
-The 3-D view is drawn by Plotly (WebGL in the browser). `examm-gui --backend pyvista` renders the
+The 3-D view is drawn by Plotly (WebGL in the browser). `manydream-gui --backend pyvista` renders the
 view with PyVista on the server instead and shows the image with camera sliders; this needs an
 off-screen OpenGL library (`sudo apt install libosmesa6`).
 
@@ -261,14 +330,14 @@ off-screen OpenGL library (`sudo apt install libosmesa6`).
 - `benchmarks/bench.py` – time per stage. On 4 cores: about 20 s for the 105 000-point data set D1
   and 25 s for 315 000 points, most of it in the AGTM fit.
 
-`examm.datasets` generates the paper's data sets (`make_d1`, `make_three_toroids`, `torus3`, ...).
+`manydream.datasets` generates the paper's data sets (`make_d1`, `make_three_toroids`, `torus3`, ...).
 
 ## Differences from the paper and the MATLAB code
 
 The package follows the paper's methodology; where the paper and the MATLAB code disagree, or
 where a different choice is numerically sounder, it deviates. All of these are parameters.
 
-| Topic | Paper | MATLAB | examm |
+| Topic | Paper | MATLAB | manydream |
 |---|---|---|---|
 | Ambient / intrinsic dimension | any | 3-D, `j <= 2` (`j <= 3` in an unused variant) | any `d`, any `j <= d` |
 | SAF | `h = 0.05`, `mu = 1e-3`, 5 iterations | same scheme, hard-wired to 3-D | same scheme; defaults `h = 0.3 r`, `mu = 0.3`, 10 iterations. With almost no repulsion, surfaces and volumes clump into ridges and are then labelled 1-D; these defaults reproduce the paper's index accuracy on D1. |

@@ -1,4 +1,4 @@
-"""examm: probabilistic modelling of general noisy multi-manifold data sets.
+"""MANY-DREAM (``manydream``): probabilistic modelling of general noisy multi-manifold data sets.
 
 Python/C++ implementation of M. Canducci, P. Tino, M. Mastropietro,
 "Probabilistic modelling of general noisy multi-manifold data sets",
@@ -6,11 +6,11 @@ Artificial Intelligence 302 (2022) 103579.
 
 Quick start::
 
-    import examm
-    learner = examm.MultiManifoldLearner(r=0.1, random_state=0).fit(X)
+    import manydream
+    learner = manydream.MultiManifoldLearner(r=0.1, random_state=0).fit(X)
     print(learner.summary())
 """
-from . import datasets, io, preprocess, viewer
+from . import datasets, io, preprocess, results, streamviz, viewer
 from ._util import set_num_threads
 from .agtm import AGTM, DegenerateModelError, DegenerateModelWarning, MultiManifoldModel
 from .crawling import ManifoldGraph, crawl, multi_manifold_crawl
@@ -20,7 +20,7 @@ from .hierarchy import HierarchicalAGTM, HNode, build_hierarchy
 from .pipeline import STAGES, Manifold, MultiManifoldLearner
 from .preprocess import LAAT, MBMS, SAF, DensityFilter, DensityThin, Pipeline, Preprocessor, PreprocessResult
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AGTM", "DegenerateModelError", "DegenerateModelWarning", "DensityFilter", "DensityThin", "DimIndexResult", "LAAT", "MBMS",

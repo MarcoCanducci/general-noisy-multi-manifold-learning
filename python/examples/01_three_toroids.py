@@ -1,9 +1,9 @@
 """Three interlocked noisy toroids in uniform background noise (data set D2 of the paper)."""
-import examm
-from examm import datasets, viz
+import manydream
+from manydream import datasets, viz
 
 ds = datasets.make_three_toroids(random_state=0)
-learner = examm.MultiManifoldLearner(r=0.1, random_state=0, verbose=True).fit(ds.X)
+learner = manydream.MultiManifoldLearner(r=0.1, random_state=0, verbose=True).fit(ds.X)
 print(learner.summary())
 
 viz.plot_summary(learner).savefig("three_toroids_summary.png", dpi=150)

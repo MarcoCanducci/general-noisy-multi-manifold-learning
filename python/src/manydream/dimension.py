@@ -47,8 +47,50 @@ def barycentric(spectrum) -> np.ndarray:
     return np.clip((L - nxt) * np.arange(1, L.shape[-1] + 1), 0.0, 1.0)
 
 
+def _weighted_local_pca(tree, X, r, w, n_vec, block=1024):
+    """Local PCA in which neighbour ``j`` counts with weight ``w[j]`` -> counts, eigenvalues, vectors."""
+    n, d = X.shape
+    counts = np.zeros(n, dtype=np.int64)
+    ev = np.zeros((n, d))
+    vec = np.zeros((n, n_vec, d))
+    for start in range(0, n, block):                    # neighbour lists are queried block by block
+        stop = min(start + block, n)
+        indptr, j, _ = tree.radius_neighbors(np.ascontiguousarray(X[start:stop]), float(r))
+        cnt = np.diff(indptr)
+        off = indptr[:-1]
+        wj = w[j]
+        sw = np.add.reduceat(wj, off)
+        mean = np.add.reduceat(wj[:, None] * X[j], off, axis=0) / sw[:, None]
+        Dc = (X[j] - np.repeat(mean, cnt, axis=0)) * np.sqrt(wj)[:, None]
+        C = np.zeros((stop - start, d, d))
+        for a_ in range(d):                             # one column at a time keeps the memory at entries x d
+            C[:, a_, :] = np.add.reduceat(Dc[:, a_, None] * Dc, off, axis=0)
+        val, V = np.linalg.eigh(C / sw[:, None, None])
+        counts[start:stop] = cnt
+        ev[start:stop] = np.maximum(val[:, ::-1], 0.0)
+        if n_vec:
+            vec[start:stop] = np.transpose(V[:, :, ::-1], (0, 2, 1))[:, :n_vec]
+    return counts, ev, vec
+
+
+def _weighted_smooth(tree, X, P, r, sigma, valid, w, block=1024):
+    """Gaussian average of the rows of ``P`` over neighbours, neighbour ``j`` weighted by ``w[j]``."""
+    n = len(X)
+    out = np.zeros_like(P)
+    for start in range(0, n, block):
+        stop = min(start + block, n)
+        indptr, j, dist = tree.radius_neighbors(np.ascontiguousarray(X[start:stop]), float(r))
+        g = np.exp(-dist ** 2 / (2 * sigma ** 2)) * w[j] * valid[j]
+        off = indptr[:-1]
+        den = np.add.reduceat(g, off)
+        for k in range(P.shape[1]):
+            out[start:stop, k] = np.add.reduceat(g * P[j, k], off) / np.maximum(den, 1e-300)
+    out[~valid.astype(bool)] = 0.0
+    return out
+
+
 def dimensionality_index(X, r: float, *, smooth_factor: float = 1.0, min_points: int | None = None,
-                         n_vec: int = 0, tree=None) -> DimIndexResult:
+                         n_vec: int = 0, tree=None, density_weight: bool = False) -> DimIndexResult:
     """Estimate the local intrinsic dimensionality of every point.
 
     Parameters
@@ -65,6 +107,12 @@ def dimensionality_index(X, r: float, *, smooth_factor: float = 1.0, min_points:
         Default ``max(d + 1, 5)``.
     n_vec : int
         Number of leading local eigenvectors to return (``tangents``).
+    density_weight : bool
+        Weight every neighbour by the inverse of its own local density (the number of points in
+        its ball of radius ``r``), in the local PCA and in the smoothing. The index then describes
+        the shape of the region the data occupy and not where most of the points are: without
+        it, a neighbourhood that straddles a dense and a sparse structure is described by the
+        dense one alone, which moves the boundary between them into the sparse structure.
     """
     X = as_points(X)
     r = check_radius(r)
@@ -72,7 +120,11 @@ def dimensionality_index(X, r: float, *, smooth_factor: float = 1.0, min_points:
     if min_points is None:
         min_points = max(d + 1, 5)
     tree = tree if tree is not None else build_tree(X)
-    counts, ev, vec = tree.local_pca(X, r, int(n_vec), int(min_points))
+    if density_weight:
+        w = 1.0 / np.maximum(tree.radius_count(X, r), 1)
+        counts, ev, vec = _weighted_local_pca(tree, X, r, w, int(n_vec))
+    else:
+        counts, ev, vec = tree.local_pca(X, r, int(n_vec), int(min_points))
     tot = ev.sum(axis=1)
     valid = (counts >= min_points) & (tot > 0)
     L = np.zeros_like(ev)
@@ -94,7 +146,8 @@ def dimensionality_index(X, r: float, *, smooth_factor: float = 1.0, min_points:
 
     if smooth_factor > 0:
         rs = smooth_factor * r
-        PS = tree.kernel_smooth(P, rs, rs, valid.astype(np.uint8))
+        PS = (_weighted_smooth(tree, X, P, rs, rs, valid.astype(float), w) if density_weight
+              else tree.kernel_smooth(P, rs, rs, valid.astype(np.uint8)))
     else:
         PS = P.copy()
     index = np.where(valid, np.argmax(PS, axis=1) + 1, 0)
