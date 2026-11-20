@@ -10,7 +10,7 @@ Quick start::
     learner = manydream.MultiManifoldLearner(r=0.1, random_state=0).fit(X)
     print(learner.summary())
 """
-from . import datasets, io, preprocess, results, streamviz, viewer
+from . import datasets, io, laat_exact, preprocess, results, streamviz, viewer
 from ._util import set_num_threads
 from .agtm import AGTM, DegenerateModelError, DegenerateModelWarning, MultiManifoldModel
 from .crawling import ManifoldGraph, crawl, multi_manifold_crawl
@@ -26,5 +26,5 @@ __all__ = [
     "AGTM", "DegenerateModelError", "DegenerateModelWarning", "DensityFilter", "DensityThin", "DimIndexResult", "LAAT", "MBMS",
     "HNode", "HierarchicalAGTM", "Manifold", "ManifoldGraph", "MultiManifoldLearner", "MultiManifoldModel", "Pipeline",
     "PreprocessResult", "Preprocessor", "SAF", "STAGES", "build_hierarchy", "crawl", "datasets", "dimensionality_index",
-    "epsilon_graph", "io", "multi_manifold_crawl", "preprocess", "set_num_threads",
+    "epsilon_graph", "io", "laat_exact", "multi_manifold_crawl", "preprocess", "set_num_threads",
 ]

@@ -110,6 +110,26 @@ ambient dimension. Points to keep in mind:
   their largest value in each neighbourhood, and the dynamic neighbourhood radius of that code is
   not included. On 40,000 points in 3-D the two steps together take about 13 s.
 
+#### LAAT as in the paper, and its Markov chain
+
+`manydream.laat_exact` follows the LAAT paper equation by equation (fixed radius, sum normalisation,
+Boltzmann jump probabilities). It is meant for studying the method, not for preprocessing large data.
+Without reinforcement (`kappa = 1`) the ants form a Markov chain, and its stationary distribution is
+computed directly, with no ants:
+
+```python
+from manydream.laat_exact import LAATGraph, run
+
+G = LAATGraph(X, r=0.3)                     # norm="max" divides by the largest value instead of the sum
+pi = G.stationary(beta=10.0)                # stationary distribution of the chain, one value per point
+F = run(G, start="median", kappa=0.8, beta=10.0, n_epochs=30)   # pheromone of the full LAAT
+```
+
+`start` chooses where the ants begin (`"uniform"`, `"median"`, `"density"`, `"stationary"`,
+`"complement"`, `"inverse"`, `"one_minus_pi"`), and `length=` gives every ant its own number of jumps.
+With `norm="sum"`, `beta` is in effect divided by the number of neighbours, so the chain is close to a
+random walk in dense neighbourhoods unless `beta` is large; `norm="max"` removes that dependence.
+
 ### Plugging in another preprocessing step
 
 Your own denoiser fits in by implementing one method:
