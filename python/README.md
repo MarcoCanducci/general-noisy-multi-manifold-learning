@@ -19,13 +19,34 @@ called `examm` before version 0.2; models saved under that name still load.
 
 ## Install
 
+Requirements: Git, Python 3.10 or newer, a C++17 compiler and CMake (on Ubuntu / WSL:
+`sudo apt install build-essential cmake`), and an internet connection for the download and the
+install. Once installed, everything runs offline.
+
 ```bash
-pip install ./python            # from the repository root; add [viz], [gui] or [all] for the extras
+git clone --depth 1 --filter=blob:none --sparse https://github.com/MarcoCanducci/general-noisy-multi-manifold-learning.git
 ```
 
-Building from source needs a C++17 compiler and CMake (on Ubuntu / WSL: `sudo apt install
-build-essential cmake`). Prebuilt manylinux wheels are produced by the `wheels` GitHub workflow
-and attached to releases; with a wheel no compiler is needed.
+```bash
+cd general-noisy-multi-manifold-learning && git sparse-checkout set python
+```
+
+```bash
+python -m venv venv && source venv/bin/activate && pip install "./python[gui]"
+```
+
+```bash
+manydream-gui
+```
+
+The first two commands download only the Python package (about 90 MB instead of the whole
+repository, 1.6 GB). The third creates a virtual environment and installs the package with the GUI;
+on Windows, activate it with `venv\Scripts\activate` instead of `source venv/bin/activate`. The last
+opens the GUI in the browser: choose a built-in example in step 1 and run the steps in order.
+
+From an existing copy of the repository, `pip install ./python` installs the library alone; add
+`[viz]`, `[gui]` or `[all]` for the extras. Prebuilt manylinux wheels are produced by the `wheels`
+GitHub workflow and attached to releases; with a wheel no compiler is needed.
 
 Core dependencies are NumPy and SciPy only. Extras: `manydream[viz]` (matplotlib figures),
 `manydream[gui]` (browser GUI), `manydream[io]` (HDF5 and FITS tables).
