@@ -346,10 +346,19 @@ each structure's unfolded graph, all structures together and the outlier criteri
 
 The steps expose the same choices as the library:
 
-- **Preprocess**: optional thinning of over-dense regions; the filter (density filter or LAAT) and the
-  diffusion (SAF or MBMS) are chosen separately, so the default pair and the 1-DREAM pair can be mixed.
-- **Dimensionality**: smoothing width, estimating the index on a thinned copy of the data
-  (`index_preprocess`), and the inverse-density weighting (`index_density_weight`).
+- **Preprocess**, in two parts. **3a. Filter**: optional thinning of over-dense regions, then the density
+  filter or LAAT. *Compute filter scores* gives every point its score (points in a ball, or pheromone);
+  moving the threshold then shows, in the 3-D view, only the points that would be kept, coloured by
+  their score, with a histogram in which the removed part is grey. **3b. Diffusion**: SAF or MBMS,
+  applied to the points kept by the threshold. The filter runs before the diffusion for both filters,
+  and the two pairs can be mixed.
+- **Radii**: the filter, the diffusion and the dimensionality index each have their own radius, in the
+  units of the data. They start at the usual fractions of the scale `r` of step 2 (0.5 r for the density
+  filter, 0.7 r for LAAT and MBMS, 0.3 r for SAF, r for the index) and are reset when `r` changes. Moving a
+  radius draws a ball of that size in the view, to compare with the structures.
+- **Dimensionality**: the radius of the neighbourhoods (`index_radius`), the smoothing width, estimating
+  the index on a thinned copy of the data (`index_preprocess`), and the inverse-density weighting
+  (`index_density_weight`). It works on the filtered and diffused points of step 3.
 - **Explore**: for a 1-D manifold, the two 1-DREAM views (`manydream.streamviz`): the bi-dimensional profile,
   and the co-moving frames with a slider to walk along the filament and a movie download.
 
