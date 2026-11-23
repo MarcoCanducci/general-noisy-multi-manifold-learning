@@ -394,3 +394,30 @@ degeneracy handling) and the full pipeline on the paper's data sets.
 ## Licence
 
 GNU Affero General Public License v3 or later, as the MATLAB sources.
+
+## Installing the toolbox in four commands
+
+Requirements: Git, Python 3.10 or newer, a C++17 compiler and CMake (on Ubuntu / WSL:
+`sudo apt install build-essential cmake`), and an internet connection for the download and the
+install. Once installed, the GUI runs offline.
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/MarcoCanducci/general-noisy-multi-manifold-learning.git
+```
+
+```bash
+cd general-noisy-multi-manifold-learning && git sparse-checkout set python
+```
+
+```bash
+python -m venv venv && source venv/bin/activate && pip install "./python[gui]"
+```
+
+```bash
+manydream-gui
+```
+
+The first two commands download only the Python package (about 90 MB instead of the whole
+repository, 1.6 GB). The third creates a virtual environment and installs the package with the GUI;
+on Windows, activate it with `venv\Scripts\activate` instead of `source venv/bin/activate`. The last
+opens the GUI in the browser: choose a built-in example in step 1 and run the steps in order.
