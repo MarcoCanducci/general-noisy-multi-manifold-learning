@@ -218,8 +218,10 @@ def test_filter_preview_threshold_radii_and_ball():
         warnings.simplefilter("ignore")
         a._run_step_impl(3)
     assert np.isclose(a.learner.index_radius, 0.8 * r) and "index_radius=" in a.script()
+    a.w_layers.value = [v for v in a.w_layers.value if v != "Scale r"]
     a.w_r.value = 1.2 * r                                  # a new scale resets the radii and the scores
     assert np.isclose(a.w_idx_r.value, 1.2 * r) and a._scores is None and a._ball is None
+    assert "Scale r" not in a.w_layers.value               # ... without drawing a ball that nobody asked for
     for name in ("w_la_rad", "w_gr_r", "w_idx_r"):         # the page echoes the radii set by the program: no ball for those
         a._on_radius(name)
         assert a._ball is None

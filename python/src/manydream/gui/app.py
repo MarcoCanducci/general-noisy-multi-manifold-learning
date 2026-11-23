@@ -523,8 +523,8 @@ class App:
             return
         if self.w_r.value and self.w_r.value > 0 and self.w_r.value != self.learner.r:
             self.learner.set_params(r=float(self.w_r.value))
+            self._ball = None                              # before the radii are reset, so that none of them claims the ball
             self._reset_radii(float(self.w_r.value))
-            self._ball = None
             self._update_status()
             self._guard(self.refresh_view)
 
@@ -617,15 +617,16 @@ class App:
 
     def _follow_index_radius(self):
         """The graphs and the density models use the radius of the dimensionality index unless changed afterwards."""
-        self.w_gr_r.value = self.w_ag_r.value = self.w_idx_r.value
-        self._radii_set.update(w_gr_r=self.w_gr_r.value, w_ag_r=self.w_ag_r.value)   # set here, not moved by hand
+        v = self.w_idx_r.value
+        self._radii_set.update(w_gr_r=v, w_ag_r=v)         # recorded first: setting a slider reports it as moved at once
+        self.w_gr_r.value = self.w_ag_r.value = v
 
     def _reset_radii(self, r: float):
         """Give the radii of the steps their usual values for the scale ``r`` (step 2)."""
         for name, (factor, _) in RADII.items():
             step = float(f"{r / 50:.1g}")
-            getattr(self, name).param.update(start=step, end=float(f"{3 * r:.3g}"), step=step, value=float(f"{factor * r:.3g}"))
-            self._radii_set[name] = getattr(self, name).value
+            self._radii_set[name] = float(f"{factor * r:.3g}")       # recorded first: setting a slider reports it as moved at once
+            getattr(self, name).param.update(start=step, end=float(f"{3 * r:.3g}"), step=step, value=self._radii_set[name])
         self._scores_stale()
 
     # ------------------------------------------------------------------ interactive choice of the threshold
