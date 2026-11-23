@@ -28,6 +28,9 @@ EXAMPLE_R = {"Three interlocked toroids (3-D)": 0.1, "Mixed manifolds D1 (3-D)":
              "Three filaments (3-D)": 0.1, "3-torus (4-D)": 1.0}
 LAYERS = ["Raw data", "Kept points (noisy)", "Diffused points", "Dimensionality index", "Graphs",
           "Attached points", "AGTM (fitted graph)", "Scale r"]
+# radii that can be set per step: widget -> (default as a multiple of r, what the ball in the view is called)
+RADII = {"w_f_rad": (0.5, "filter radius"), "w_la_rad": (0.7, "radius of the ants"), "w_saf_h": (0.3, "SAF kernel scale"),
+         "w_mb_rad": (0.7, "MBMS radius"), "w_idx_r": (1.0, "radius of the dimensionality index")}
 
 
 def suggest_radius(X, target: int = 30, sample: int = 2000, seed: int = 0) -> float:
@@ -51,6 +54,16 @@ def _colormap(values):
     lo, hi = np.nanquantile(v, 0.02), np.nanquantile(v, 0.98)
     t = np.clip((v - lo) / (hi - lo + 1e-300), 0, 1)[:, None]
     a, b = np.array([198, 219, 239.0]), np.array([8, 48, 107.0])
+    return (a + t * (b - a)).astype(np.uint8)
+
+
+def _score_colors(x, at=None):
+    """Colours of filter scores: the ramp spans the scores above the lowest one, so that the kept points differ."""
+    x = np.asarray(x, float)
+    body = x[x > x.min()] if (x > x.min()).any() else x
+    lo, hi = np.quantile(body, 0.02), np.quantile(body, 0.98)
+    t = np.clip((np.asarray(x if at is None else at, float) - lo) / (hi - lo + 1e-300), 0, 1)[:, None]
+    a, b = np.array([158, 202, 225.0]), np.array([8, 48, 107.0])
     return (a + t * (b - a)).astype(np.uint8)
 
 
@@ -130,21 +143,22 @@ class App:
         self.w_thin_target = W.IntSlider(name="Thinning: points per ball to keep", start=5, end=200, value=30)
         self.w_filt = W.Select(name="Filter", options={"Density filter": "density", "LAAT ants (1-DREAM)": "laat", "None": "none"})
         self.w_diff = W.Select(name="Diffusion", options={"SAF": "saf", "MBMS (1-DREAM)": "mbms", "None": "none"})
-        self.w_saf_h = W.FloatSlider(name="SAF kernel scale h / r", start=0.05, end=1.0, step=0.05, value=0.3)
+        self.w_saf_h = W.FloatSlider(name="SAF kernel scale h", start=0.005, end=0.3, step=0.005, value=0.03)
         self.w_saf_mu = W.FloatSlider(name="SAF repulsion mu", start=0.0, end=0.49, step=0.01, value=0.3)
         self.w_saf_it = W.IntSlider(name="SAF iterations", start=1, end=40, value=10)
-        self.w_mb_rad = W.FloatSlider(name="MBMS radius / r", start=0.2, end=1.5, step=0.05, value=0.7)
+        self.w_mb_rad = W.FloatSlider(name="MBMS radius", start=0.01, end=0.3, step=0.005, value=0.07)
         self.w_mb_dim = W.IntSlider(name="MBMS: dimension of the structures (1 = filaments)", start=1, end=3, value=1)
         self.w_mb_it = W.IntSlider(name="MBMS iterations", start=1, end=20, value=5)
-        self.w_f_rad = W.FloatSlider(name="Filter radius / r", start=0.1, end=2.0, step=0.05, value=0.5)
-        self.w_f_min = W.IntSlider(name="Filter: minimum points in the ball", start=1, end=60, value=6)
+        self.w_f_rad = W.FloatSlider(name="Filter radius", start=0.01, end=0.3, step=0.005, value=0.05)
+        self.w_f_min = W.IntSlider(name="Threshold: minimum points in the ball", start=1, end=60, value=6)
         self.w_f_mode = W.Select(name="Filter: keep", options={"core points": "core", "core + border points": "core+border"})
-        self.w_la_rad = W.FloatSlider(name="LAAT radius of the ants / r", start=0.2, end=1.5, step=0.05, value=0.7)
+        self.w_la_rad = W.FloatSlider(name="LAAT radius of the ants", start=0.01, end=0.3, step=0.005, value=0.07)
         self.w_la_ants = W.IntSlider(name="LAAT: number of ants", start=10, end=500, step=10, value=100)
         self.w_la_epochs = W.IntSlider(name="LAAT: epochs", start=1, end=100, value=25)
         self.w_la_steps = W.IntSlider(name="LAAT: steps per epoch", start=10, end=1000, step=10, value=200)
         self.w_la_kappa = W.FloatSlider(name="LAAT: weight of alignment against pheromone", start=0.0, end=1.0, step=0.05, value=0.5)
-        self.w_la_thr = W.FloatInput(name="LAAT: pheromone threshold, x mean (0 = automatic)", value=0.0, start=0.0)
+        self.w_la_thr = W.FloatSlider(name="Threshold: log10 (pheromone / mean); automatic until the scores are computed",
+                                       start=-8.0, end=2.0, step=0.02, value=0.0)
         self._pre_groups = {
             "thin": [self.w_thin_rad, self.w_thin_target],
             "saf": [self.w_saf_h, self.w_saf_mu, self.w_saf_it], "mbms": [self.w_mb_rad, self.w_mb_dim, self.w_mb_it],
@@ -152,24 +166,55 @@ class App:
             "laat": [self.w_la_rad, self.w_la_ants, self.w_la_epochs, self.w_la_steps, self.w_la_kappa, self.w_la_thr]}
         for w in (self.w_thin, self.w_filt, self.w_diff):
             w.param.watch(lambda e: self._show_pre_options(), "value")
-        self.b_pre = W.Button(name="Run preprocessing", button_type="primary")
+        self.b_scores = W.Button(name="Compute filter scores", button_type="primary")
+        self.b_scores.on_click(lambda e: self._guard(self._filter_scores))
+        self.b_diffuse = W.Button(name="Run the diffusion", button_type="primary")
+        self.b_diffuse.on_click(lambda e: self._guard(self._diffuse_then_filter))
+        self.b_pre = W.Button(name="Apply the threshold and run the diffusion", button_type="primary")
         self.b_pre.on_click(lambda e: self._run_step(2))
+        self.b_pre2 = W.Button(name="Apply the threshold", button_type="primary")
+        self.b_pre2.on_click(lambda e: self._run_step(2))
+        self.filter_info = pn.pane.Markdown("")
         self.fig_pre = pn.pane.Matplotlib(None, tight=True, dpi=90, sizing_mode="stretch_width")
+        self._scores = None          # filter scores of the points, for the interactive choice of the threshold
+        self._diffused = None        # (settings, state): the diffusion on which the density filter is previewed
+        self._la_set = False         # the LAAT threshold was chosen on the slider (otherwise automatic, by Otsu's rule)
+        self._preview = False        # the 3-D view shows the points that the current threshold keeps
+        self._ball = None            # (radius, label) of the ball drawn in the view
+        for w in (self.w_f_min, self.w_la_thr):
+            w.param.watch(lambda e: self._guard(self._on_threshold), "value_throttled")
+        self.w_f_mode.param.watch(lambda e: self._guard(self._on_threshold), "value")
+        for w in (self.w_thin, self.w_thin_rad, self.w_thin_target, self.w_filt, self.w_f_rad, self.w_la_rad,
+                  self.w_la_ants, self.w_la_epochs, self.w_la_steps, self.w_la_kappa):
+            w.param.watch(lambda e: self._scores_stale(), "value")
+        for w in (self.w_diff, self.w_saf_h, self.w_saf_mu, self.w_saf_it, self.w_mb_rad, self.w_mb_dim, self.w_mb_it):
+            w.param.watch(lambda e: self._scores_stale() if self._filter_last() else None, "value")
+        self.md_filter, self.md_diff = pn.pane.Markdown(""), pn.pane.Markdown("")
+        self.col_filter = pn.Column(
+            self.md_filter, self.w_filt, self.w_f_rad, self.w_f_mode, self.w_la_rad, self.w_la_ants, self.w_la_epochs,
+            self.w_la_steps, self.w_la_kappa, self.b_scores, pn.layout.Divider(),
+            self.w_f_min, self.w_la_thr, self.filter_info, self.b_pre2, self.fig_pre)
+        self.col_diff = pn.Column(
+            self.md_diff, self.w_diff, self.w_saf_h, self.w_saf_mu, self.w_saf_it, self.w_mb_rad, self.w_mb_dim, self.w_mb_it,
+            self.b_diffuse, self.b_pre)
+        self.pre_tabs = None
+        self.pre_holder = pn.Column()
+        self.w_filt.param.watch(lambda e: self._arrange_pre(), "value")
         tab_pre = pn.Column(
-            pn.pane.Markdown("**3. Preprocess** — a filter removes background points and a diffusion moves the rest "
-                             "towards the cores of the structures. The default pair is the density filter with SAF; "
-                             "LAAT (ants leaving pheromone on aligned structures) and MBMS (mean shift across the "
-                             "local tangent) are the 1-DREAM alternatives, best suited to filaments. LAAT runs before "
-                             "the diffusion, the density filter after it. The figure helps choosing the threshold."),
-            self.w_thin, self.w_thin_rad, self.w_thin_target, pn.layout.Divider(),
-            self.w_filt, self.w_f_rad, self.w_f_min, self.w_f_mode, self.w_la_rad, self.w_la_ants, self.w_la_epochs,
-            self.w_la_steps, self.w_la_kappa, self.w_la_thr, pn.layout.Divider(),
-            self.w_diff, self.w_saf_h, self.w_saf_mu, self.w_saf_it, self.w_mb_rad, self.w_mb_dim, self.w_mb_it,
-            self.b_pre, self.fig_pre)
+            pn.pane.Markdown("**3. Preprocess** — a **filter** removes background points and a **diffusion** moves the "
+                             "rest towards the cores of the structures. The two sub-steps follow the order of the "
+                             "method: the density filter works on the diffused points, so the diffusion comes first; "
+                             "LAAT works on the raw points, so it comes first. Each part has its own radius; the "
+                             "defaults are the usual fractions of the scale *r* of step 2."),
+            self.w_thin, self.w_thin_rad, self.w_thin_target, self.pre_holder)
+        self._arrange_pre()
         self._show_pre_options()
 
         # --- 4 dimensionality
-        self.w_smooth = W.FloatSlider(name="Smoothing radius / r", start=0.0, end=5.0, step=0.1, value=1.0)
+        self.w_idx_r = W.FloatSlider(name="Radius of the neighbourhoods", start=0.01, end=0.3, step=0.005, value=0.1)
+        self.w_smooth = W.FloatSlider(name="Smoothing radius / radius of the neighbourhoods", start=0.0, end=5.0, step=0.1, value=1.0)
+        for name in RADII:
+            getattr(self, name).param.watch(lambda e, name=name: self._guard(self._on_radius, name), "value_throttled")
         self.w_idx_thin = W.Checkbox(name="Estimate the index on a thinned copy of the data, then carry it to all points",
                                      value=False)
         self.w_idx_rad = W.FloatSlider(name="Thinning radius / r (index only)", start=0.2, end=2.0, step=0.05, value=0.6,
@@ -186,14 +231,16 @@ class App:
         self.dim_info = pn.pane.Markdown("")
         self.fig_dim = pn.pane.Matplotlib(None, tight=True, dpi=90, sizing_mode="stretch_width")
         tab_dim = pn.Column(
-            pn.pane.Markdown("**4. Dimensionality index** — local PCA in balls of radius *r* gives each diffused "
-                             "point the dimension of the structure it lies on. Wider smoothing gives fewer, "
+            pn.pane.Markdown("**4. Dimensionality index** — local PCA in balls around each filtered and diffused "
+                             "point gives it the dimension of the structure it lies on. The radius of the balls is "
+                             "the scale at which the structures are taken to be locally linear (by default *r* of "
+                             "step 2); the ball in the view shows it. Wider smoothing gives fewer, "
                              "larger structures; narrower smoothing keeps thin features. Where a dense structure "
                              "meets a sparse one, the dense one imposes its dimension on the neighbourhoods around "
                              "the junction: estimating the index on a thinned copy counters that while all points "
                              "are still used to build the graphs. The inverse-density weighting does the same "
                              "without discarding points, but can over-correct when the density varies a lot."),
-            self.w_smooth, self.w_idx_thin, self.w_idx_rad, self.w_idx_target, self.w_idx_weight,
+            self.w_idx_r, self.w_smooth, self.w_idx_thin, self.w_idx_rad, self.w_idx_target, self.w_idx_weight,
             self.b_dim, self.dim_info, self.fig_dim)
 
         # --- 5 graphs
@@ -433,6 +480,7 @@ class App:
         self.w_r.value = r
         self.w_r.step = float(f"{r / 10:.1g}")
         self._r_silent = False
+        self._reset_radii(r)
         for k, w in enumerate(self.w_ax):
             w.options = feats + (["(none)"] if k == 2 else [])
             w.value = feats[k] if k < len(feats) else "(none)"
@@ -456,6 +504,8 @@ class App:
             return
         if self.w_r.value and self.w_r.value > 0 and self.w_r.value != self.learner.r:
             self.learner.set_params(r=float(self.w_r.value))
+            self._reset_radii(float(self.w_r.value))
+            self._ball = None
             self._update_status()
             self._guard(self.refresh_view)
 
@@ -477,17 +527,200 @@ class App:
 
         if thin is not None:
             add(DensityThin, radius_factor=thin[0], target=thin[1], random_state=0)
-        if self.w_filt.value == "laat":
-            add(LAAT, radius_factor=self.w_la_rad.value, n_ants=self.w_la_ants.value, n_epochs=self.w_la_epochs.value,
-                n_steps=self.w_la_steps.value, kappa=self.w_la_kappa.value,
-                threshold=self.w_la_thr.value if self.w_la_thr.value > 0 else "otsu")
-        if self.w_diff.value == "saf":
-            add(SAF, radius_factor=self.w_saf_h.value, mu=self.w_saf_mu.value, n_iter=self.w_saf_it.value)
-        elif self.w_diff.value == "mbms":
-            add(MBMS, radius_factor=self.w_mb_rad.value, dim=self.w_mb_dim.value, n_iter=self.w_mb_it.value)
-        if self.w_filt.value == "density":
-            add(DensityFilter, radius_factor=self.w_f_rad.value, min_points=self.w_f_min.value, mode=self.w_f_mode.value)
+        if not self._filter_last():                       # LAAT works on the raw points
+            for cls, kw in self._filter_step():
+                add(cls, **kw)
+        for cls, kw in self._diffusion_step():
+            add(cls, **kw)
+        if self._filter_last():                           # the density filter works on the diffused points
+            for cls, kw in self._filter_step():
+                add(cls, **kw)
         return out
+
+    def _filter_last(self) -> bool:
+        """True when the filter runs after the diffusion (the density filter)."""
+        return self.w_filt.value == "density"
+
+    def _arrange_pre(self):
+        """Order and wording of the two sub-steps for the chosen filter."""
+        last = self._filter_last()
+        self._filter_tab = 1 if last else 0
+        self.md_filter.object = (
+            "The density filter keeps the points whose ball holds at least a minimum number of points, both among the raw "
+            "and among the diffused points. Move the threshold: the view shows the diffused points that would be kept, "
+            "coloured by their count, and the histogram shows where the threshold cuts. The ball in the view has the "
+            "radius being set." if last else
+            "LAAT lets ants walk along aligned structures; points with little pheromone are removed (the 1-DREAM filter, "
+            "best suited to filaments). **Compute the scores**, then move the threshold: the view shows only the points "
+            "that would be kept, coloured by their pheromone, and the histogram shows where the threshold cuts."
+            if self.w_filt.value == "laat" else "No filter: every point is passed on.")
+        self.md_diff.object = (
+            "The diffusion moves the points towards the cores of the structures: SAF (the default) or MBMS (mean shift "
+            "across the local tangent, the 1-DREAM step). " + (
+                "**Run the diffusion**; the density filter of 3b is then set on its result." if last else
+                "The button applies the threshold of 3a and then the diffusion." if self.w_filt.value == "laat" else
+                "The button runs it on all points."))
+        self.b_scores.visible = self.w_filt.value != "none"
+        self.b_diffuse.visible = self.b_pre2.visible = last
+        self.b_pre.visible = not last
+        self.b_pre.name = "Apply the threshold and run the diffusion" if self.w_filt.value == "laat" else "Run the diffusion"
+        tabs = [("Filter", self.col_filter), ("Diffusion", self.col_diff)]
+        if last:
+            tabs.reverse()
+        # a new strip of tabs: reordering one in place leaves stale titles in the page
+        self.pre_tabs = self.pn.Tabs(*[(f"3{'ab'[k]}. {name}", col) for k, (name, col) in enumerate(tabs)], dynamic=False)
+        self.pre_tabs.param.watch(lambda e: self._guard(self._on_pre_tab), "active")
+        self.pre_holder[:] = [self.pre_tabs]
+
+    def _diffusion_step(self):
+        """The diffusion as [(class, keyword arguments)]; empty without a diffusion."""
+        if self.w_diff.value == "saf":
+            return [(SAF, dict(radius=self.w_saf_h.value, mu=self.w_saf_mu.value, n_iter=self.w_saf_it.value))]
+        if self.w_diff.value == "mbms":
+            return [(MBMS, dict(radius=self.w_mb_rad.value, dim=self.w_mb_dim.value, n_iter=self.w_mb_it.value))]
+        return []
+
+    def _diffuse_then_filter(self):
+        """Run the diffusion, score its result for the density filter and open the filter sub-step."""
+        self._scores = None
+        self._filter_scores()
+        self.pre_tabs.active = self._filter_tab
+
+    def _filter_step(self):
+        """The filter as [(class, keyword arguments)]; empty without a filter."""
+        if self.w_filt.value == "laat":
+            return [(LAAT, dict(radius=self.w_la_rad.value, n_ants=self.w_la_ants.value, n_epochs=self.w_la_epochs.value,
+                                n_steps=self.w_la_steps.value, kappa=self.w_la_kappa.value,
+                                threshold=float(f"{10.0 ** self.w_la_thr.value:.4g}") if self._la_set else "otsu"))]
+        if self.w_filt.value == "density":
+            return [(DensityFilter, dict(radius=self.w_f_rad.value, min_points=self.w_f_min.value, mode=self.w_f_mode.value))]
+        return []
+
+    def _reset_radii(self, r: float):
+        """Give the radii of the steps their usual values for the scale ``r`` (step 2)."""
+        for name, (factor, _) in RADII.items():
+            step = float(f"{r / 50:.1g}")
+            getattr(self, name).param.update(start=step, end=float(f"{3 * r:.3g}"), step=step, value=float(f"{factor * r:.3g}"))
+        self._scores_stale()
+
+    # ------------------------------------------------------------------ interactive choice of the threshold
+    def _scores_stale(self):
+        self._la_set = False
+        self._diffused = None
+        if self._scores is not None:
+            self._scores = None
+            self._preview = False
+            self.filter_info.object = "*The filter settings changed: compute the scores again.*"
+
+    def _filter_scores(self):
+        """Score of every point for the chosen filter (after the optional thinning), kept for the threshold slider."""
+        from manydream._util import build_tree
+        from manydream.preprocess import PreprocessResult, _otsu
+
+        if self.learner is None:
+            raise ValueError("load a data set and apply the features first")
+        kind = self.w_filt.value
+        if kind == "none":
+            self._scores, self._preview = None, False
+            self.filter_info.object = "No filter: every point is passed to the diffusion."
+            self.fig_pre.object = None
+            self.refresh_view()
+            return
+        state = PreprocessResult.initial(self.X)
+        if self.w_thin.value:
+            state = DensityThin(radius_factor=self.w_thin_rad.value, target=self.w_thin_target.value,
+                                random_state=0).apply(state, float(self.learner.r))
+        P, extra = state.noisy, {}
+        if kind == "density":                             # as DensityFilter: counts among the raw and the diffused points
+            key = repr((self.w_thin.value, self.w_thin_rad.value, self.w_thin_target.value, self._diffusion_step()))
+            if self._diffused is None or self._diffused[0] != key:
+                for cls, kw in self._diffusion_step():
+                    state = cls(**kw).apply(state, float(self.learner.r))
+                self._diffused = (key, state)
+            state = self._diffused[1]
+            rad, tree = float(self.w_f_rad.value), build_tree(state.diffused)
+            v = np.minimum(build_tree(state.noisy).radius_count(state.noisy, rad),
+                           tree.radius_count(state.diffused, rad)).astype(float)
+            P, extra = state.diffused, dict(tree=tree, radius=rad)
+            self.w_f_min.param.update(end=int(max(v.max(), self.w_f_min.value, 2)))
+        else:
+            cls, kw = self._filter_step()[0]
+            v = cls(**kw).pheromone(P, float(self.w_la_rad.value))
+            mean = float(v.mean())
+            auto = float(np.exp(_otsu(np.log(v))) / mean) if v.max() > v.min() else 1.0
+            lo, hi = float(np.log10(v.min() / mean)), float(np.log10(v.max() / mean))
+            self.w_la_thr.param.update(start=float(np.floor(lo * 10) / 10 - 0.5), end=float(np.ceil(hi * 10) / 10), step=0.02,
+                                       value=float(np.round(np.log10(auto), 2)))
+            self._la_set = True
+        self._scores = dict(kind=kind, values=v, points=P, mean=float(v.mean()), **extra)
+        name = "w_f_rad" if kind == "density" else "w_la_rad"
+        self._ball = (float(getattr(self, name).value), RADII[name][1])
+        self._show_threshold()
+        self._say("Diffusion done and scores computed. Move the threshold in 3b: the view shows the diffused points "
+                  "that are kept. Then apply the threshold." if kind == "density" else
+                  "Scores computed. Move the threshold in 3a: the view shows the points that are kept. "
+                  "Then go to 3b and run the diffusion.", "success")
+
+    def _threshold(self):
+        """(threshold in the units of the scores, mask of the kept points)."""
+        sc = self._scores
+        if sc["kind"] == "density":
+            thr = float(self.w_f_min.value)
+            keep = sc["values"] >= thr
+            if self.w_f_mode.value == "core+border":      # also the points within the radius of a core point
+                keep = sc["tree"].radius_any(sc["points"], sc["radius"], keep.astype(np.uint8)).astype(bool)
+            return thr, keep
+        thr = float(f"{10.0 ** self.w_la_thr.value:.4g}") * sc["mean"]
+        return thr, sc["values"] > thr
+
+    def _on_threshold(self):
+        if self._scores is not None:
+            self._show_threshold()
+
+    def _show_threshold(self, preview: bool = True):
+        import matplotlib.pyplot as plt
+
+        sc = self._scores
+        thr, keep = self._threshold()
+        v, logs = sc["values"], sc["kind"] == "laat"
+        x = np.log10(np.maximum(v, 1e-300)) if logs else v
+        t = np.log10(max(thr, 1e-300)) if logs else thr - 0.5
+        edges = (np.linspace(x.min(), x.max() + 1e-12, 81) if logs
+                 else np.arange(0.5, min(x.max(), np.quantile(x, 0.995) + 1) + 1.5))
+        h, _ = np.histogram(x, edges)
+        mid = 0.5 * (edges[1:] + edges[:-1])
+        col = np.array([f"#{r:02x}{g:02x}{b:02x}" for r, g, b in _score_colors(x, mid)])
+        col[mid < t] = "#dddcd6"
+        fig, ax = plt.subplots(figsize=(5.5, 3.4))
+        ax.bar(mid, h, width=np.diff(edges), color=col, edgecolor="white", linewidth=0.2)
+        ax.axvline(t, color="#0b0b0b", linewidth=1, linestyle="--")
+        ax.set(xlabel="log10 pheromone on a point" if logs
+               else f"points within radius {self.w_f_rad.value:g}: the smaller of the raw and the diffused count",
+               ylabel="points", title=f"kept: {int(keep.sum()):,} of {len(v):,} points (in colour)")
+        ax.spines[["top", "right"]].set_visible(False)
+        self._fig(self.fig_pre, fig)
+        self.filter_info.object = (f"The threshold keeps **{int(keep.sum()):,}** of {len(v):,} points "
+                                   f"({keep.mean():.1%}). Grey bars: removed. Coloured bars: kept, with the colours of the view.")
+        if preview:
+            self._preview = True
+            self.refresh_view()
+
+    def _on_radius(self, name: str):
+        """A radius was moved: draw a ball of that radius in the view."""
+        if self.X is None:
+            return
+        self._ball = (float(getattr(self, name).value), RADII[name][1])
+        if "Scale r" not in self.w_layers.value:
+            self.w_layers.value = list(self.w_layers.value) + ["Scale r"]      # triggers the redraw
+        else:
+            self.refresh_view()
+
+    def _on_pre_tab(self):
+        if self._preview and self.pre_tabs.active != self._filter_tab:
+            self._preview = False
+            self.refresh_view()
+        elif self._scores is not None and self.pre_tabs.active == self._filter_tab and not self._preview:
+            self._show_threshold()
 
     @staticmethod
     def _as_spec(steps):
@@ -512,6 +745,7 @@ class App:
             zb = (self.w_zlo.value if self.w_zlo.value > 0 else 0.0, self.w_zhi.value if self.w_zhi.value > 0 else np.inf)
         return dict(
             r=float(self.w_r.value), preprocess=self._preprocess_spec(), smooth_factor=self.w_smooth.value,
+            index_radius=float(self.w_idx_r.value),
             index_preprocess=self._as_spec(self._index_steps()), index_density_weight=bool(self.w_idx_weight.value),
             graph=self.w_graph.value, dims=sorted(int(j) for j in self.w_dims.value), eta=self.w_eta.value,
             beta=self.w_beta.value, min_nodes=self.w_minnodes.value or None, epsilon=self.w_eps.value,
@@ -535,8 +769,11 @@ class App:
             raise ValueError("select at least one dimension to extract")
         if self.w_beta.value >= self.w_eta.value:
             raise ValueError("the merge tolerance beta must be smaller than the step size eta")
+        if step == 2 and self.w_filt.value != "none" and self._scores is None:
+            self._filter_scores()                      # the scores fix the threshold that is applied and are shown below
         self._sync_params()
         L = self.learner
+        self._preview = False
         self._say(f"Running {STEPS[step].lower()}…", "info")
         L.run(until=STAGE_OF_STEP[step])
         t = L.timings_.get(STAGE_OF_STEP[step], 0.0)
@@ -579,20 +816,11 @@ class App:
 
         L = self.learner
         if step == 2:
-            if self.w_filt.value == "density":
-                self._fig(self.fig_pre, viz.plot_density_counts(self.X, self.w_f_rad.value * L.r, self.w_f_min.value))
-            elif self.w_filt.value == "laat" and "laat_pheromone_all" in L.preprocess_.info:
-                import matplotlib.pyplot as plt
-
-                F, thr = L.preprocess_.info["laat_pheromone_all"], L.preprocess_.info["laat_threshold"]
-                fig, ax = plt.subplots(figsize=(5.5, 3.6))
-                ax.hist(np.log10(F), bins=80, color=viz.CATEGORICAL[0], edgecolor="white", linewidth=0.2)
-                ax.axvline(np.log10(thr), color="#0b0b0b", linewidth=1, linestyle="--")
-                ax.set(xlabel="log10 pheromone on a point", ylabel="points", title=f"kept: pheromone above {thr:.3g}")
-                ax.spines[["top", "right"]].set_visible(False)
-                self._fig(self.fig_pre, fig)
-            else:
-                self.fig_pre.object = None
+            n = len(L.preprocess_)
+            if self._scores is not None:
+                self._show_threshold(preview=False)
+            self.filter_info.object = (f"Applied: **{n:,}** of {len(self.X):,} points were kept."
+                                       if self.w_filt.value != "none" else "No filter: every point was kept.")
         elif step == 3:
             c = L.dim_result_.counts_per_dim()
             self.dim_info.object = " | ".join(f"**{k}-D**: {v:,}" if k else f"undetermined: {v:,}" for k, v in sorted(c.items()))
@@ -725,13 +953,21 @@ class App:
             return np.sort(rng.choice(n, self.max_display, replace=False)) if n > self.max_display else np.arange(n)
 
         focus = self.w_manifold.value if (L is not None and L._done >= 4 and self.w_manifold.value is not None) else -1
-        if "Raw data" in on:
+        preview = self._preview and self._scores is not None and self.tabs.active == 2
+        if preview:                                   # only the points that the threshold keeps, coloured by their score
+            scv = self._scores
+            _, keep = self._threshold()
+            x = np.log10(np.maximum(scv["values"], 1e-300)) if scv["kind"] == "laat" else scv["values"]
+            k = np.flatnonzero(keep)
+            k = k[sub(len(k))]
+            sc.points("kept by the threshold", v(scv["points"][k]), _score_colors(x)[k] if len(k) else "#2a78d6", 1.8, 0.9)
+        if "Raw data" in on and not preview:
             s = sub(len(self.X))
             col = "#b9b8b2"
             if self.w_colour.value != "(none)":
                 col = _colormap(self.table[:, self.columns.index(self.w_colour.value)])[s]
             sc.points("raw data", v(self.X[s]), col, 1.5, 0.6)
-        if L is not None and L._done >= 1:
+        if L is not None and L._done >= 1 and not preview:
             pre = L.preprocess_
             s = sub(len(pre))
             if "Kept points (noisy)" in on:
@@ -743,7 +979,7 @@ class App:
                 for j in np.unique(idx):
                     sc.points("undetermined" if j == 0 else f"{j}-D", v(pre.diffused[s][idx == j]),
                               viz.DIM_COLORS.get(int(j), "#0b0b0b"), 1.8)
-        if L is not None and L._done >= 3:
+        if L is not None and L._done >= 3 and not preview:
             fitted = L._done >= 4
             items = list(enumerate(L.manifolds_)) if fitted else list(enumerate(g for gs in L.graphs_.values() for g in gs))
             for k, it in items:
@@ -761,7 +997,8 @@ class App:
         if "Scale r" in on and L is not None:
             ref = L.preprocess_.diffused if L._done >= 1 else self.X
             centre = ref[np.argmin(np.linalg.norm(ref - np.median(ref, 0), axis=1))]
-            sc.sphere("scale r", v(centre[None])[0], float(L.r))
+            rad, what = self._ball if self._ball is not None else (float(L.r), "scale r")
+            sc.sphere(f"{what} = {rad:g}", v(centre[None])[0], rad)
         if not sc.layers:
             sc.points("raw data", v(self.X[sub(len(self.X))]), "#b9b8b2", 1.5, 0.3)
         pane, used = render(sc, self.backend, pane=getattr(self, "_pane", None),
@@ -873,7 +1110,7 @@ class App:
         lines += [
             "", f"preprocess = {pre}", f"index_preprocess = {idx}      # where the dimensionality index is estimated", "",
             "learner = manydream.MultiManifoldLearner(",
-            f"    r={p['r']!r}, preprocess=preprocess, smooth_factor={p['smooth_factor']!r},",
+            f"    r={p['r']!r}, preprocess=preprocess, index_radius={p['index_radius']!r}, smooth_factor={p['smooth_factor']!r},",
             f"    index_preprocess=index_preprocess, index_density_weight={p['index_density_weight']!r},",
             f"    graph={p['graph']!r}, dims={p['dims']!r}, eta={p['eta']!r}, beta={p['beta']!r}, "
             f"min_nodes={p['min_nodes']!r},",

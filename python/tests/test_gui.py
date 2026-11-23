@@ -152,3 +152,58 @@ def test_skeleton_and_membership_downloads(app):
     assert sorted(z.namelist()) == ["skeleton_edges.csv", "skeleton_nodes.csv"]
     rows = app._dl_membership().getvalue().decode().splitlines()
     assert rows[0].startswith("row,structure,p_on_structure,p_background") and len(rows) == len(app.X) + 1
+
+
+def test_filter_preview_threshold_radii_and_ball():
+    a = App()
+    a.w_example.value = "Three filaments (3-D)"
+    a._load_example()
+    r = a.learner.r
+    assert np.isclose(a.w_f_rad.value, 0.5 * r) and np.isclose(a.w_mb_rad.value, 0.7 * r) and np.isclose(a.w_idx_r.value, r)
+    a.tabs.active = 2
+    # density filter: it works on the diffused points, so the diffusion is the first sub-step
+    assert a.pre_tabs._names == ["3a. Diffusion", "3b. Filter"] and a.b_diffuse.visible and not a.b_pre.visible
+    a._diffuse_then_filter()
+    assert a.pre_tabs.active == 1 and a._scores["points"] is a._diffused[1].diffused
+    assert a._preview and a.fig_pre.object is not None and a._ball == (a.w_f_rad.value, "filter radius")
+    a.w_f_min.value = 12
+    a._on_threshold()
+    kept = int(a._threshold()[1].sum())
+    assert f"{kept:,}" in a.filter_info.object
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a._run_step_impl(2)
+    assert len(a.learner.preprocess_) == kept and not a._preview
+    assert [n for n, _ in a.learner.preprocess_.info["steps"]] == ["SAF", "DensityFilter"]      # the paper's order
+    a.w_f_mode.value = "core+border"
+    border = int(a._threshold()[1].sum())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a._run_step_impl(2)
+    assert border > kept and len(a.learner.preprocess_) == border
+    a.w_f_mode.value = "core"
+    # LAAT: automatic threshold until the scores are computed, then the slider decides
+    a.w_filt.value, a.w_diff.value = "laat", "mbms"
+    assert a.pre_tabs._names == ["3a. Filter", "3b. Diffusion"] and a.b_pre.visible and not a.b_diffuse.visible
+    assert a._scores is None and a._filter_step()[0][1]["threshold"] == "otsu"
+    a._filter_scores()
+    auto = int(a._threshold()[1].sum())
+    v, (thr, keep) = a._scores["values"], a._threshold()
+    a.w_la_thr.value = float(np.round(np.log10(np.median(v[keep]) / a._scores["mean"]), 2))   # half of the kept points
+    a._on_threshold()
+    kept = int(a._threshold()[1].sum())
+    assert 0 < kept < auto and isinstance(a._filter_step()[0][1]["threshold"], float)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a._run_step_impl(2)
+    assert len(a.learner.preprocess_) == kept
+    # a radius of its own for the dimensionality index, and the ball of the radius being set
+    a.w_idx_r.value = 0.8 * r
+    a._on_radius("w_idx_r")
+    assert a._ball == (a.w_idx_r.value, "radius of the dimensionality index") and "Scale r" in a.w_layers.value
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a._run_step_impl(3)
+    assert np.isclose(a.learner.index_radius, 0.8 * r) and "index_radius=" in a.script()
+    a.w_r.value = 1.2 * r                                  # a new scale resets the radii and the scores
+    assert np.isclose(a.w_idx_r.value, 1.2 * r) and a._scores is None and a._ball is None

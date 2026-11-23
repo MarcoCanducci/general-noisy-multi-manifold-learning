@@ -21,7 +21,7 @@ STAGES = ("preprocess", "dimension", "graphs", "agtm")
 # which stage each parameter first affects
 _PARAM_STAGE = {
     "r": 0, "preprocess": 0,
-    "smooth_factor": 1, "dim_min_points": 1, "index_preprocess": 1, "index_density_weight": 1,
+    "smooth_factor": 1, "index_radius": 1, "dim_min_points": 1, "index_preprocess": 1, "index_density_weight": 1,
     "dims": 2, "graph": 2, "eta": 2, "beta": 2, "min_points": 2, "min_nodes": 2, "min_residual": 2,
     "angle_threshold": 2, "attach": 2,
     "epsilon": 3, "agtm_params": 3, "background": 3,
@@ -80,7 +80,10 @@ class MultiManifoldLearner:
     epsilon : int
         Spacing in hops of the AGTM basis-function centres.
     smooth_factor : float
-        Spatial smoothing radius of the dimensionality index in units of ``r``.
+        Spatial smoothing radius of the dimensionality index, in units of the radius of its
+        neighbourhoods.
+    index_radius : float, optional
+        Radius of the neighbourhoods on which the dimensionality index is estimated. Default ``r``.
     index_preprocess : preprocessing step, pipeline or name, optional
         If given, the dimensionality index is estimated on the points this preprocessing leaves
         (typically ``Pipeline([DensityThin(...), SAF(), DensityFilter()])``) and carried to every
@@ -112,7 +115,7 @@ class MultiManifoldLearner:
     """
 
     def __init__(self, r: float, *, preprocess="saf", dims=None, graph: str = "crawl", eta: float = 0.75,
-                 beta: float = 0.4, epsilon: int = 1, smooth_factor: float = 1.0,
+                 beta: float = 0.4, epsilon: int = 1, smooth_factor: float = 1.0, index_radius: float | None = None,
                  dim_min_points: int | None = None, index_preprocess=None, index_density_weight: bool = False,
                  min_points: int = 5, min_nodes: int | None = None,
                  min_residual: int = 20, angle_threshold: float = 2.0 / 3.0, attach: str = "same_dim",
@@ -126,6 +129,7 @@ class MultiManifoldLearner:
         self.beta = beta
         self.epsilon = epsilon
         self.smooth_factor = smooth_factor
+        self.index_radius = index_radius
         self.dim_min_points = dim_min_points
         self.index_preprocess = index_preprocess
         self.index_density_weight = index_density_weight
@@ -187,8 +191,9 @@ class MultiManifoldLearner:
         if self._done < 1:
             self.run_preprocess()
         t = time.perf_counter()
+        rad = check_radius(self.r if self.index_radius is None else self.index_radius, "index_radius")
         if self.index_preprocess is None:
-            self.dim_result_ = dimensionality_index(self.preprocess_.diffused, float(self.r),
+            self.dim_result_ = dimensionality_index(self.preprocess_.diffused, float(rad),
                                                     smooth_factor=self.smooth_factor,
                                                     min_points=self.dim_min_points,
                                                     density_weight=bool(self.index_density_weight))
@@ -202,7 +207,7 @@ class MultiManifoldLearner:
             sub = resolve(self.index_preprocess).apply(PreprocessResult.initial(self.X_), float(self.r))
             if len(sub) == 0:
                 raise ValueError("index_preprocess removed every point")
-            res = dimensionality_index(sub.diffused, float(self.r), smooth_factor=self.smooth_factor,
+            res = dimensionality_index(sub.diffused, float(rad), smooth_factor=self.smooth_factor,
                                        min_points=self.dim_min_points,
                                        density_weight=bool(self.index_density_weight))
             _, nn = cKDTree(sub.noisy).query(self.preprocess_.noisy)
