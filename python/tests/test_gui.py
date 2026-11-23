@@ -161,8 +161,10 @@ def test_filter_preview_threshold_radii_and_ball():
     r = a.learner.r
     assert np.isclose(a.w_f_rad.value, 0.5 * r) and np.isclose(a.w_mb_rad.value, 0.7 * r) and np.isclose(a.w_idx_r.value, r)
     a.tabs.active = 2
-    # density filter: the scores are counts, the preview keeps what the pipeline will keep
-    a._filter_scores()
+    # density filter: it works on the diffused points, so the diffusion is the first sub-step
+    assert a.pre_tabs._names == ["3a. Diffusion", "3b. Filter"] and a.b_diffuse.visible and not a.b_pre.visible
+    a._diffuse_then_filter()
+    assert a.pre_tabs.active == 1 and a._scores["points"] is a._diffused[1].diffused
     assert a._preview and a.fig_pre.object is not None and a._ball == (a.w_f_rad.value, "filter radius")
     a.w_f_min.value = 12
     a._on_threshold()
@@ -172,9 +174,17 @@ def test_filter_preview_threshold_radii_and_ball():
         warnings.simplefilter("ignore")
         a._run_step_impl(2)
     assert len(a.learner.preprocess_) == kept and not a._preview
-    assert [n for n, _ in a.learner.preprocess_.info["steps"]] == ["DensityFilter", "SAF"]
+    assert [n for n, _ in a.learner.preprocess_.info["steps"]] == ["SAF", "DensityFilter"]      # the paper's order
+    a.w_f_mode.value = "core+border"
+    border = int(a._threshold()[1].sum())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a._run_step_impl(2)
+    assert border > kept and len(a.learner.preprocess_) == border
+    a.w_f_mode.value = "core"
     # LAAT: automatic threshold until the scores are computed, then the slider decides
     a.w_filt.value, a.w_diff.value = "laat", "mbms"
+    assert a.pre_tabs._names == ["3a. Filter", "3b. Diffusion"] and a.b_pre.visible and not a.b_diffuse.visible
     assert a._scores is None and a._filter_step()[0][1]["threshold"] == "otsu"
     a._filter_scores()
     auto = int(a._threshold()[1].sum())

@@ -168,44 +168,46 @@ class App:
             w.param.watch(lambda e: self._show_pre_options(), "value")
         self.b_scores = W.Button(name="Compute filter scores", button_type="primary")
         self.b_scores.on_click(lambda e: self._guard(self._filter_scores))
+        self.b_diffuse = W.Button(name="Run the diffusion", button_type="primary")
+        self.b_diffuse.on_click(lambda e: self._guard(self._diffuse_then_filter))
         self.b_pre = W.Button(name="Apply the threshold and run the diffusion", button_type="primary")
         self.b_pre.on_click(lambda e: self._run_step(2))
+        self.b_pre2 = W.Button(name="Apply the threshold", button_type="primary")
+        self.b_pre2.on_click(lambda e: self._run_step(2))
         self.filter_info = pn.pane.Markdown("")
         self.fig_pre = pn.pane.Matplotlib(None, tight=True, dpi=90, sizing_mode="stretch_width")
         self._scores = None          # filter scores of the points, for the interactive choice of the threshold
+        self._diffused = None        # (settings, state): the diffusion on which the density filter is previewed
         self._la_set = False         # the LAAT threshold was chosen on the slider (otherwise automatic, by Otsu's rule)
         self._preview = False        # the 3-D view shows the points that the current threshold keeps
         self._ball = None            # (radius, label) of the ball drawn in the view
         for w in (self.w_f_min, self.w_la_thr):
             w.param.watch(lambda e: self._guard(self._on_threshold), "value_throttled")
-        for w in (self.w_thin, self.w_thin_rad, self.w_thin_target, self.w_filt, self.w_f_rad, self.w_f_mode, self.w_la_rad,
+        self.w_f_mode.param.watch(lambda e: self._guard(self._on_threshold), "value")
+        for w in (self.w_thin, self.w_thin_rad, self.w_thin_target, self.w_filt, self.w_f_rad, self.w_la_rad,
                   self.w_la_ants, self.w_la_epochs, self.w_la_steps, self.w_la_kappa):
             w.param.watch(lambda e: self._scores_stale(), "value")
-        self.pre_tabs = pn.Tabs(
-            ("3a. Filter", pn.Column(
-                pn.pane.Markdown("A filter gives every point a score and removes the points below a threshold: the "
-                                 "number of points in a ball (density filter), or the pheromone left by ants that walk "
-                                 "along aligned structures (LAAT, the 1-DREAM filter, best suited to filaments). "
-                                 "**Compute the scores**, then move the threshold: the view shows only the points that "
-                                 "would be kept, coloured by their score, and the histogram shows where the threshold "
-                                 "cuts. The ball in the view has the radius being set."),
-                self.w_thin, self.w_thin_rad, self.w_thin_target, pn.layout.Divider(),
-                self.w_filt, self.w_f_rad, self.w_f_mode, self.w_la_rad, self.w_la_ants, self.w_la_epochs,
-                self.w_la_steps, self.w_la_kappa, self.b_scores, pn.layout.Divider(),
-                self.w_f_min, self.w_la_thr, self.filter_info, self.fig_pre)),
-            ("3b. Diffusion", pn.Column(
-                pn.pane.Markdown("The diffusion moves the kept points towards the cores of the structures: SAF "
-                                 "(the default) or MBMS (mean shift across the local tangent, the 1-DREAM step). "
-                                 "The button applies the threshold of 3a and then the diffusion; the result is "
-                                 "passed to the dimensionality index."),
-                self.w_diff, self.w_saf_h, self.w_saf_mu, self.w_saf_it, self.w_mb_rad, self.w_mb_dim, self.w_mb_it,
-                self.b_pre)), dynamic=False)
-        self.pre_tabs.param.watch(lambda e: self._guard(self._on_pre_tab), "active")
+        for w in (self.w_diff, self.w_saf_h, self.w_saf_mu, self.w_saf_it, self.w_mb_rad, self.w_mb_dim, self.w_mb_it):
+            w.param.watch(lambda e: self._scores_stale() if self._filter_last() else None, "value")
+        self.md_filter, self.md_diff = pn.pane.Markdown(""), pn.pane.Markdown("")
+        self.col_filter = pn.Column(
+            self.md_filter, self.w_filt, self.w_f_rad, self.w_f_mode, self.w_la_rad, self.w_la_ants, self.w_la_epochs,
+            self.w_la_steps, self.w_la_kappa, self.b_scores, pn.layout.Divider(),
+            self.w_f_min, self.w_la_thr, self.filter_info, self.b_pre2, self.fig_pre)
+        self.col_diff = pn.Column(
+            self.md_diff, self.w_diff, self.w_saf_h, self.w_saf_mu, self.w_saf_it, self.w_mb_rad, self.w_mb_dim, self.w_mb_it,
+            self.b_diffuse, self.b_pre)
+        self.pre_tabs = None
+        self.pre_holder = pn.Column()
+        self.w_filt.param.watch(lambda e: self._arrange_pre(), "value")
         tab_pre = pn.Column(
-            pn.pane.Markdown("**3. Preprocess** — in two parts: a **filter** removes background points (3a), then a "
-                             "**diffusion** sharpens what is left (3b). Each has its own radius; the defaults are the "
-                             "usual fractions of the scale *r* of step 2."),
-            self.pre_tabs)
+            pn.pane.Markdown("**3. Preprocess** — a **filter** removes background points and a **diffusion** moves the "
+                             "rest towards the cores of the structures. The two sub-steps follow the order of the "
+                             "method: the density filter works on the diffused points, so the diffusion comes first; "
+                             "LAAT works on the raw points, so it comes first. Each part has its own radius; the "
+                             "defaults are the usual fractions of the scale *r* of step 2."),
+            self.w_thin, self.w_thin_rad, self.w_thin_target, self.pre_holder)
+        self._arrange_pre()
         self._show_pre_options()
 
         # --- 4 dimensionality
@@ -525,13 +527,64 @@ class App:
 
         if thin is not None:
             add(DensityThin, radius_factor=thin[0], target=thin[1], random_state=0)
-        for cls, kw in self._filter_step():
+        if not self._filter_last():                       # LAAT works on the raw points
+            for cls, kw in self._filter_step():
+                add(cls, **kw)
+        for cls, kw in self._diffusion_step():
             add(cls, **kw)
-        if self.w_diff.value == "saf":
-            add(SAF, radius=self.w_saf_h.value, mu=self.w_saf_mu.value, n_iter=self.w_saf_it.value)
-        elif self.w_diff.value == "mbms":
-            add(MBMS, radius=self.w_mb_rad.value, dim=self.w_mb_dim.value, n_iter=self.w_mb_it.value)
+        if self._filter_last():                           # the density filter works on the diffused points
+            for cls, kw in self._filter_step():
+                add(cls, **kw)
         return out
+
+    def _filter_last(self) -> bool:
+        """True when the filter runs after the diffusion (the density filter)."""
+        return self.w_filt.value == "density"
+
+    def _arrange_pre(self):
+        """Order and wording of the two sub-steps for the chosen filter."""
+        last = self._filter_last()
+        self._filter_tab = 1 if last else 0
+        self.md_filter.object = (
+            "The density filter keeps the points whose ball holds at least a minimum number of points, both among the raw "
+            "and among the diffused points. Move the threshold: the view shows the diffused points that would be kept, "
+            "coloured by their count, and the histogram shows where the threshold cuts. The ball in the view has the "
+            "radius being set." if last else
+            "LAAT lets ants walk along aligned structures; points with little pheromone are removed (the 1-DREAM filter, "
+            "best suited to filaments). **Compute the scores**, then move the threshold: the view shows only the points "
+            "that would be kept, coloured by their pheromone, and the histogram shows where the threshold cuts."
+            if self.w_filt.value == "laat" else "No filter: every point is passed on.")
+        self.md_diff.object = (
+            "The diffusion moves the points towards the cores of the structures: SAF (the default) or MBMS (mean shift "
+            "across the local tangent, the 1-DREAM step). " + (
+                "**Run the diffusion**; the density filter of 3b is then set on its result." if last else
+                "The button applies the threshold of 3a and then the diffusion." if self.w_filt.value == "laat" else
+                "The button runs it on all points."))
+        self.b_scores.visible = self.w_filt.value != "none"
+        self.b_diffuse.visible = self.b_pre2.visible = last
+        self.b_pre.visible = not last
+        self.b_pre.name = "Apply the threshold and run the diffusion" if self.w_filt.value == "laat" else "Run the diffusion"
+        tabs = [("Filter", self.col_filter), ("Diffusion", self.col_diff)]
+        if last:
+            tabs.reverse()
+        # a new strip of tabs: reordering one in place leaves stale titles in the page
+        self.pre_tabs = self.pn.Tabs(*[(f"3{'ab'[k]}. {name}", col) for k, (name, col) in enumerate(tabs)], dynamic=False)
+        self.pre_tabs.param.watch(lambda e: self._guard(self._on_pre_tab), "active")
+        self.pre_holder[:] = [self.pre_tabs]
+
+    def _diffusion_step(self):
+        """The diffusion as [(class, keyword arguments)]; empty without a diffusion."""
+        if self.w_diff.value == "saf":
+            return [(SAF, dict(radius=self.w_saf_h.value, mu=self.w_saf_mu.value, n_iter=self.w_saf_it.value))]
+        if self.w_diff.value == "mbms":
+            return [(MBMS, dict(radius=self.w_mb_rad.value, dim=self.w_mb_dim.value, n_iter=self.w_mb_it.value))]
+        return []
+
+    def _diffuse_then_filter(self):
+        """Run the diffusion, score its result for the density filter and open the filter sub-step."""
+        self._scores = None
+        self._filter_scores()
+        self.pre_tabs.active = self._filter_tab
 
     def _filter_step(self):
         """The filter as [(class, keyword arguments)]; empty without a filter."""
@@ -553,6 +606,7 @@ class App:
     # ------------------------------------------------------------------ interactive choice of the threshold
     def _scores_stale(self):
         self._la_set = False
+        self._diffused = None
         if self._scores is not None:
             self._scores = None
             self._preview = False
@@ -576,9 +630,18 @@ class App:
         if self.w_thin.value:
             state = DensityThin(radius_factor=self.w_thin_rad.value, target=self.w_thin_target.value,
                                 random_state=0).apply(state, float(self.learner.r))
-        P = state.noisy
-        if kind == "density":
-            v = build_tree(P).radius_count(P, float(self.w_f_rad.value)).astype(float)
+        P, extra = state.noisy, {}
+        if kind == "density":                             # as DensityFilter: counts among the raw and the diffused points
+            key = repr((self.w_thin.value, self.w_thin_rad.value, self.w_thin_target.value, self._diffusion_step()))
+            if self._diffused is None or self._diffused[0] != key:
+                for cls, kw in self._diffusion_step():
+                    state = cls(**kw).apply(state, float(self.learner.r))
+                self._diffused = (key, state)
+            state = self._diffused[1]
+            rad, tree = float(self.w_f_rad.value), build_tree(state.diffused)
+            v = np.minimum(build_tree(state.noisy).radius_count(state.noisy, rad),
+                           tree.radius_count(state.diffused, rad)).astype(float)
+            P, extra = state.diffused, dict(tree=tree, radius=rad)
             self.w_f_min.param.update(end=int(max(v.max(), self.w_f_min.value, 2)))
         else:
             cls, kw = self._filter_step()[0]
@@ -589,11 +652,13 @@ class App:
             self.w_la_thr.param.update(start=float(np.floor(lo * 10) / 10 - 0.5), end=float(np.ceil(hi * 10) / 10), step=0.02,
                                        value=float(np.round(np.log10(auto), 2)))
             self._la_set = True
-        self._scores = dict(kind=kind, values=v, points=P, mean=float(v.mean()))
+        self._scores = dict(kind=kind, values=v, points=P, mean=float(v.mean()), **extra)
         name = "w_f_rad" if kind == "density" else "w_la_rad"
         self._ball = (float(getattr(self, name).value), RADII[name][1])
         self._show_threshold()
-        self._say("Scores computed. Move the threshold in 3a: the view shows the points that are kept. "
+        self._say("Diffusion done and scores computed. Move the threshold in 3b: the view shows the diffused points "
+                  "that are kept. Then apply the threshold." if kind == "density" else
+                  "Scores computed. Move the threshold in 3a: the view shows the points that are kept. "
                   "Then go to 3b and run the diffusion.", "success")
 
     def _threshold(self):
@@ -601,7 +666,10 @@ class App:
         sc = self._scores
         if sc["kind"] == "density":
             thr = float(self.w_f_min.value)
-            return thr, sc["values"] >= thr
+            keep = sc["values"] >= thr
+            if self.w_f_mode.value == "core+border":      # also the points within the radius of a core point
+                keep = sc["tree"].radius_any(sc["points"], sc["radius"], keep.astype(np.uint8)).astype(bool)
+            return thr, keep
         thr = float(f"{10.0 ** self.w_la_thr.value:.4g}") * sc["mean"]
         return thr, sc["values"] > thr
 
@@ -627,7 +695,7 @@ class App:
         ax.bar(mid, h, width=np.diff(edges), color=col, edgecolor="white", linewidth=0.2)
         ax.axvline(t, color="#0b0b0b", linewidth=1, linestyle="--")
         ax.set(xlabel="log10 pheromone on a point" if logs
-               else f"points within radius {self.w_f_rad.value:g} (including the point itself)",
+               else f"points within radius {self.w_f_rad.value:g}: the smaller of the raw and the diffused count",
                ylabel="points", title=f"kept: {int(keep.sum()):,} of {len(v):,} points (in colour)")
         ax.spines[["top", "right"]].set_visible(False)
         self._fig(self.fig_pre, fig)
@@ -648,10 +716,10 @@ class App:
             self.refresh_view()
 
     def _on_pre_tab(self):
-        if self._preview and self.pre_tabs.active != 0:
+        if self._preview and self.pre_tabs.active != self._filter_tab:
             self._preview = False
             self.refresh_view()
-        elif self._scores is not None and self.pre_tabs.active == 0 and not self._preview:
+        elif self._scores is not None and self.pre_tabs.active == self._filter_tab and not self._preview:
             self._show_threshold()
 
     @staticmethod
@@ -751,8 +819,8 @@ class App:
             n = len(L.preprocess_)
             if self._scores is not None:
                 self._show_threshold(preview=False)
-            self.filter_info.object = (f"Applied: **{n:,}** of {len(self.X):,} points were kept and passed to the diffusion."
-                                       if self.w_filt.value != "none" else "No filter: every point was passed to the diffusion.")
+            self.filter_info.object = (f"Applied: **{n:,}** of {len(self.X):,} points were kept."
+                                       if self.w_filt.value != "none" else "No filter: every point was kept.")
         elif step == 3:
             c = L.dim_result_.counts_per_dim()
             self.dim_info.object = " | ".join(f"**{k}-D**: {v:,}" if k else f"undetermined: {v:,}" for k, v in sorted(c.items()))

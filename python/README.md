@@ -346,12 +346,13 @@ each structure's unfolded graph, all structures together and the outlier criteri
 
 The steps expose the same choices as the library:
 
-- **Preprocess**, in two parts. **3a. Filter**: optional thinning of over-dense regions, then the density
-  filter or LAAT. *Compute filter scores* gives every point its score (points in a ball, or pheromone);
-  moving the threshold then shows, in the 3-D view, only the points that would be kept, coloured by
-  their score, with a histogram in which the removed part is grey. **3b. Diffusion**: SAF or MBMS,
-  applied to the points kept by the threshold. The filter runs before the diffusion for both filters,
-  and the two pairs can be mixed.
+- **Preprocess**, in two sub-steps that follow the order of the method. With the **density filter** the
+  diffusion comes first (3a) and the filter second (3b), as in the paper: the filter counts the points in a
+  ball among both the raw and the diffused points. With **LAAT** the filter comes first (3a) and the
+  diffusion second (3b), as in 1-DREAM. In the filter sub-step the threshold is chosen on the figure:
+  moving it shows, in the 3-D view, only the points that would be kept, coloured by their score, with a
+  histogram in which the removed part is grey. The pipeline that runs is the same as from the library; the
+  two pairs can be mixed.
 - **Radii**: the filter, the diffusion and the dimensionality index each have their own radius, in the
   units of the data. They start at the usual fractions of the scale `r` of step 2 (0.5 r for the density
   filter, 0.7 r for LAAT and MBMS, 0.3 r for SAF, r for the index) and are reset when `r` changes. Moving a
