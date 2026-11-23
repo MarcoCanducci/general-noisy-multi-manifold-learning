@@ -353,10 +353,13 @@ The steps expose the same choices as the library:
   moving it shows, in the 3-D view, only the points that would be kept, coloured by their score, with a
   histogram in which the removed part is grey. The pipeline that runs is the same as from the library; the
   two pairs can be mixed.
-- **Radii**: the filter, the diffusion and the dimensionality index each have their own radius, in the
-  units of the data. They start at the usual fractions of the scale `r` of step 2 (0.5 r for the density
-  filter, 0.7 r for LAAT and MBMS, 0.3 r for SAF, r for the index) and are reset when `r` changes. Moving a
-  radius draws a ball of that size in the view, to compare with the structures.
+- **Radii**: the filter, the diffusion, the dimensionality index, the graphs and the density models each have
+  their own radius, in the units of the data. The first three start at the usual fractions of the scale `r`
+  of step 2 (0.5 r for the density filter, 0.7 r for LAAT and MBMS, 0.3 r for SAF, r for the index) and are
+  reset when `r` changes. The radius of the graphs (`graph_radius`) and the radius within which points are
+  attached to a graph for its density model (`agtm_radius`) start at the radius of the index and follow it
+  until changed. Moving a radius draws a wire ball of that size in the view, placed near the boundary of
+  the data where there are fewest points, to compare with the structures.
 - **Dimensionality**: the radius of the neighbourhoods (`index_radius`), the smoothing width, estimating
   the index on a thinned copy of the data (`index_preprocess`), and the inverse-density weighting
   (`index_density_weight`). It works on the filtered and diffused points of step 3.

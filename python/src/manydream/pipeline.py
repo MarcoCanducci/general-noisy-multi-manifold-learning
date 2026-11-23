@@ -22,7 +22,7 @@ STAGES = ("preprocess", "dimension", "graphs", "agtm")
 _PARAM_STAGE = {
     "r": 0, "preprocess": 0,
     "smooth_factor": 1, "index_radius": 1, "dim_min_points": 1, "index_preprocess": 1, "index_density_weight": 1,
-    "dims": 2, "graph": 2, "eta": 2, "beta": 2, "min_points": 2, "min_nodes": 2, "min_residual": 2,
+    "dims": 2, "graph": 2, "graph_radius": 2, "agtm_radius": 3, "eta": 2, "beta": 2, "min_points": 2, "min_nodes": 2, "min_residual": 2,
     "angle_threshold": 2, "attach": 2,
     "epsilon": 3, "agtm_params": 3, "background": 3,
     "random_state": 2, "n_jobs": 0, "verbose": 4,
@@ -76,7 +76,13 @@ class MultiManifoldLearner:
     graph : {"crawl", "epsilon"}
         Manifold crawling (accurate, default) or the faster epsilon-graph alternative.
     eta, beta : float
-        Crawling step size and merge tolerance, in units of ``r``.
+        Crawling step size and merge tolerance, in units of the radius of the graphs.
+    graph_radius : float, optional
+        Radius used to build the graphs (crawling or epsilon-graph). Default: the radius of the
+        dimensionality index (``index_radius``, or ``r``).
+    agtm_radius : float, optional
+        Points closer than this to a node of a graph are attached to it and used to fit its
+        density model. Default: the radius of the dimensionality index.
     epsilon : int
         Spacing in hops of the AGTM basis-function centres.
     smooth_factor : float
@@ -116,6 +122,7 @@ class MultiManifoldLearner:
 
     def __init__(self, r: float, *, preprocess="saf", dims=None, graph: str = "crawl", eta: float = 0.75,
                  beta: float = 0.4, epsilon: int = 1, smooth_factor: float = 1.0, index_radius: float | None = None,
+                 graph_radius: float | None = None, agtm_radius: float | None = None,
                  dim_min_points: int | None = None, index_preprocess=None, index_density_weight: bool = False,
                  min_points: int = 5, min_nodes: int | None = None,
                  min_residual: int = 20, angle_threshold: float = 2.0 / 3.0, attach: str = "same_dim",
@@ -130,6 +137,8 @@ class MultiManifoldLearner:
         self.epsilon = epsilon
         self.smooth_factor = smooth_factor
         self.index_radius = index_radius
+        self.graph_radius = graph_radius
+        self.agtm_radius = agtm_radius
         self.dim_min_points = dim_min_points
         self.index_preprocess = index_preprocess
         self.index_density_weight = index_density_weight
@@ -175,6 +184,27 @@ class MultiManifoldLearner:
         if self.attach not in ("same_dim", "all"):
             raise ValueError("attach must be 'same_dim' or 'all'")
 
+    def radius_of(self, stage: str) -> float:
+        """Radius used by a stage: "dimension", "graphs" or "agtm". The graphs and the density models use
+        the radius of the dimensionality index unless they are given their own."""
+        base = self.r if self.index_radius is None else self.index_radius
+        own = {"dimension": None, "graphs": self.graph_radius, "agtm": self.agtm_radius}[stage]
+        return check_radius(base if own is None else own, f"radius of {stage}")
+
+    def _attach(self, radius: float):
+        """Attach to every graph the preprocessed points closer than ``radius`` to one of its nodes."""
+        from ._util import build_tree
+
+        pre, idx, trees = self.preprocess_, self.dim_result_.index, {}
+        for j, gs in self.graphs_.items():
+            for g in gs:
+                key = j if self.attach == "same_dim" else -1
+                if key not in trees:
+                    sel = np.flatnonzero(idx == j) if key >= 0 else np.arange(len(pre))
+                    trees[key] = (build_tree(np.ascontiguousarray(pre.noisy[sel])), sel)
+                tree, back = trees[key]
+                g.points = back[np.flatnonzero(tree.radius_union(g.nodes, float(radius)))]
+
     # ------------------------------------------------------------------ stages
     def run_preprocess(self) -> PreprocessResult:
         t = time.perf_counter()
@@ -191,7 +221,7 @@ class MultiManifoldLearner:
         if self._done < 1:
             self.run_preprocess()
         t = time.perf_counter()
-        rad = check_radius(self.r if self.index_radius is None else self.index_radius, "index_radius")
+        rad = self.radius_of("dimension")
         if self.index_preprocess is None:
             self.dim_result_ = dimensionality_index(self.preprocess_.diffused, float(rad),
                                                     smooth_factor=self.smooth_factor,
@@ -226,6 +256,7 @@ class MultiManifoldLearner:
             self.run_dimension()
         t = time.perf_counter()
         pre, idx = self.preprocess_, self.dim_result_.index
+        rad = self.radius_of("graphs")
         d = self.X_.shape[1]
         dims = list(range(1, d)) if self.dims is None else [int(j) for j in np.atleast_1d(self.dims)]
         rng = rng_from(self.random_state if not isinstance(self.random_state, np.random.Generator)
@@ -239,25 +270,19 @@ class MultiManifoldLearner:
                 self.graphs_[j] = []
                 continue
             D = np.ascontiguousarray(pre.diffused[sel])
-            Q = np.ascontiguousarray(pre.noisy[sel])
             if self.graph == "crawl":
-                gs = multi_manifold_crawl(D, self.r, j, eta=self.eta, beta=self.beta, min_points=self.min_points,
+                gs = multi_manifold_crawl(D, rad, j, eta=self.eta, beta=self.beta, min_points=self.min_points,
                                           min_nodes=self.min_nodes, min_residual=self.min_residual,
                                           random_state=rng)
             else:
-                gs = epsilon_graph(D, self.r, j, angle_threshold=self.angle_threshold,
+                gs = epsilon_graph(D, rad, j, angle_threshold=self.angle_threshold,
                                    min_points=self.min_points, min_nodes=self.min_nodes, random_state=rng)
-            # attach noisy points; indices refer to the preprocessed set
-            from ._util import build_tree
-            if self.attach == "same_dim":
-                tree, back = build_tree(Q), sel
-            else:
-                tree, back = build_tree(pre.noisy), np.arange(len(pre))
             for g in gs:
                 if g.node_index is not None:
                     g.node_index = sel[g.node_index]
-                g.points = back[np.flatnonzero(tree.radius_union(g.nodes, float(self.r)))]
-            self.graphs_[j] = [g for g in gs if len(g.points) > 0]
+            self.graphs_[j] = gs
+        self._attach(rad)                                  # noisy points near each graph; indices refer to the preprocessed set
+        self.graphs_ = {j: [g for g in gs if len(g.points) > 0] for j, gs in self.graphs_.items()}
         self.timings_["graphs"] = time.perf_counter() - t
         self._done = 3
         self._log("graphs: " + ", ".join(f"{len(v)} of dim {k}" for k, v in self.graphs_.items())
@@ -269,6 +294,7 @@ class MultiManifoldLearner:
             self.run_graphs()
         t = time.perf_counter()
         pre = self.preprocess_
+        self._attach(self.radius_of("agtm"))               # the points on which every density model is fitted
         params = dict(epsilon=self.epsilon)
         params.update(self.agtm_params or {})
         self.manifolds_ = []
@@ -375,6 +401,9 @@ class MultiManifoldLearner:
             return "MultiManifoldLearner (not fitted)"
         n, d = self.X_.shape
         lines = [f"MultiManifoldLearner: {n} points in {d}-D, r = {self.r:g}"]
+        rad = {k: self.radius_of(k) for k in ("dimension", "graphs", "agtm")}
+        if any(v != self.r for v in rad.values()):
+            lines.append("  radii      : " + ", ".join(f"{k} {v:g}" for k, v in rad.items()))
         if self._done >= 1:
             lines.append(f"  preprocess : kept {len(self.preprocess_)} points ({len(self.preprocess_) / n:.1%})")
         if self._done >= 2:

@@ -48,16 +48,18 @@ class Scene:
         return self
 
     def sphere(self, name, centre, radius, color="#e34948"):
-        """Three great circles marking a ball of the given radius."""
+        """A ball of the given radius as a wire globe: meridians and parallels (one circle in a flat scene)."""
         t = np.linspace(0, 2 * np.pi, 49)
         c = np.asarray(to_xyz(np.atleast_2d(centre))[0])
         z = np.zeros_like(t)
-        rings = [np.c_[np.cos(t), np.sin(t), z], np.c_[np.cos(t), z, np.sin(t)], np.c_[z, np.cos(t), np.sin(t)]]
         if self.flat:
-            rings = rings[:1]
+            rings = [np.c_[np.cos(t), np.sin(t), z]]
+        else:
+            rings = [np.c_[np.cos(a) * np.sin(t), np.sin(a) * np.sin(t), np.cos(t)] for a in np.arange(6) * np.pi / 6]
+            rings += [np.c_[np.cos(b) * np.cos(t), np.cos(b) * np.sin(t), np.sin(b) + z] for b in np.radians([-60, -30, 0, 30, 60])]
         nodes = np.vstack([c + radius * r for r in rings])
         edges = np.vstack([np.c_[np.arange(48), np.arange(1, 49)] + 49 * k for k in range(len(rings))])
-        return self.lines(name, nodes, edges, color, 3.0)
+        return self.lines(name, nodes, edges, color, 2.0)
 
 
 @lru_cache(maxsize=1)

@@ -207,3 +207,39 @@ def test_filter_preview_threshold_radii_and_ball():
     assert np.isclose(a.learner.index_radius, 0.8 * r) and "index_radius=" in a.script()
     a.w_r.value = 1.2 * r                                  # a new scale resets the radii and the scores
     assert np.isclose(a.w_idx_r.value, 1.2 * r) and a._scores is None and a._ball is None
+
+
+def test_radii_of_graphs_and_density_models_and_ball_placement(app):
+    a = app
+    r = a.learner.r
+    a.w_idx_r.value = 0.9 * r                              # the later steps follow the radius of the index ...
+    assert np.isclose(a.w_gr_r.value, 0.9 * r) and np.isclose(a.w_ag_r.value, 0.9 * r)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a._run_step_impl(5)
+    L = a.learner
+    assert np.isclose(L.radius_of("graphs"), 0.9 * r) and np.isclose(L.radius_of("agtm"), 0.9 * r) and "radii" in L.summary()
+    n0 = sum(m.n_points for m in L.manifolds_)
+    a.w_ag_r.value = 0.45 * r                              # ... until they are given their own
+    a._sync_params()
+    assert L.stale_stages == ("agtm",)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a._run_step_impl(5)
+    assert sum(m.n_points for m in L.manifolds_) < n0 and "agtm_radius=" in a.script() and "graph_radius=" in a.script()
+    a.w_gr_r.value = 1.1 * r
+    a._sync_params()
+    assert L.stale_stages == ("graphs", "agtm")
+    a._on_radius("w_gr_r")
+    assert a._ball == (a.w_gr_r.value, "radius of the graphs")
+    # the ball is drawn near the boundary of the data, where there are few points
+    V = a._view()(a.X)
+    c = a._ball_centre(V, a.w_gr_r.value, False)
+    lo, hi = V.min(0), V.max(0)
+    assert ((c >= lo) & (c <= hi)).all() and (np.minimum(c - lo, hi - c).min() <= 1.3 * a.w_gr_r.value)
+    near = (np.linalg.norm(V - c, axis=1) < a.w_gr_r.value).sum()
+    assert near <= np.median([(np.linalg.norm(V - p, axis=1) < a.w_gr_r.value).sum() for p in V[::500]])
+    a.w_idx_r.value = r
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        a._run_step_impl(5)
