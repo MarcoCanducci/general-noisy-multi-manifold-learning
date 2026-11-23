@@ -47,7 +47,7 @@ class Scene:
             self.layers.append(("lines", name, nodes, edges, color, float(width)))
         return self
 
-    def sphere(self, name, centre, radius, color="#e34948"):
+    def sphere(self, name, centre, radius, color="#0b0b0b"):
         """A ball of the given radius as a wire globe: meridians and parallels (one circle in a flat scene)."""
         t = np.linspace(0, 2 * np.pi, 49)
         c = np.asarray(to_xyz(np.atleast_2d(centre))[0])
