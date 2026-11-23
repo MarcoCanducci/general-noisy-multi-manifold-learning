@@ -305,7 +305,10 @@ class App:
         self.w_manifold.param.watch(lambda e: self._guard(self._explore), "value")
         self.w_quantity.param.watch(lambda e: self._guard(self._explore), "value")
         # the two 1-DREAM views of a filament
-        self.w_sv_vals = W.MultiChoice(name="Quantities (columns of the table)", options=[], value=[], max_items=3)
+        self.w_sv_auto = W.Checkbox(name="Produce both views as soon as a filament is selected", value=True)
+        self.w_sv_vals = W.MultiChoice(name="Profile: quantities to show (columns of the table)", options=[], value=[], max_items=3)
+        self.w_sv_fvals = W.MultiChoice(name="Frames: quantities to show (columns of the table)", options=[], value=[], max_items=3)
+        self._sv_silent = False
         self.w_sv_rmax = W.FloatInput(name="Profile: largest distance from the core", value=0.1, start=1e-12, width=260)
         self.w_sv_nrad = W.IntSlider(name="Profile: radial bins", start=5, end=40, value=19)
         self.b_sv_prof = W.Button(name="Bi-dimensional profile", button_type="primary")
@@ -322,14 +325,20 @@ class App:
         self._sv_frames = None
         self.b_sv_prof.on_click(lambda e: self._guard(self._sv_profile))
         self.b_sv_frames.on_click(lambda e: self._guard(self._sv_compute_frames))
+        self.w_sv_vals.param.watch(lambda e: self._guard(self._sv_auto, "profile"), "value")
+        self.w_sv_fvals.param.watch(lambda e: self._guard(self._sv_auto, "frames"), "value")
         self.w_sv_frame.param.watch(lambda e: self._guard(self._sv_show_frame), "value_throttled")
         self.sv_box = pn.Column(
             pn.pane.Markdown("**Views of a filament (1-DREAM)** — for a 1-D manifold. The *bi-dimensional profile* "
                              "shows each quantity against the position along the filament and the distance from its "
                              "core. The *co-moving frames* show the quantities, the point density and the fitted "
-                             "model on a plane perpendicular to the filament, moved along it."),
-            self.w_sv_vals, pn.Row(self.w_sv_rmax, self.w_sv_nrad), self.b_sv_prof,
-            pn.Row(self.w_sv_side, self.w_sv_up), self.w_sv_thick, self.b_sv_frames, self.sv_info, self.dl_sv_movie,
+                             "model on a plane perpendicular to the filament, moved along it. Each view has its own "
+                             "choice of quantities; with the box ticked, both are drawn when a filament is selected "
+                             "and redrawn when its quantities change. The buttons redraw after changing the other "
+                             "settings."),
+            self.w_sv_auto,
+            self.w_sv_vals, pn.Row(self.w_sv_rmax, self.w_sv_nrad), self.b_sv_prof, pn.layout.Divider(),
+            self.w_sv_fvals, pn.Row(self.w_sv_side, self.w_sv_up), self.w_sv_thick, self.b_sv_frames, self.sv_info, self.dl_sv_movie,
             pn.pane.Markdown("*The figures appear on the right, above the 3-D view.*"), visible=False)
         # the figures of the filament views are wide: they go above the 3-D view
         self.sv_figures = pn.Column(self.fig_sv_prof, self.w_sv_frame, self.fig_sv_frame, sizing_mode="stretch_width", visible=False)
@@ -875,9 +884,12 @@ class App:
             self.sv_info.object = ""
             if is_curve:
                 passive = [c for c in self.columns if c not in self.feature_names]
-                self.w_sv_vals.options = list(self.columns)
-                self.w_sv_vals.value = (passive or list(self.feature_names))[:2]
+                self._sv_silent = True                     # set the defaults without drawing three times
+                self.w_sv_vals.options = self.w_sv_fvals.options = list(self.columns)
+                self.w_sv_vals.value = self.w_sv_fvals.value = (passive or list(self.feature_names))[:2]
                 self.w_sv_rmax.value, self.w_sv_side.value = float(L.r), 2.0 * float(L.r)
+                self._sv_silent = False
+                self._sv_auto("both")
         if k is None or k < 0:
             self._fig(self.fig_explore, viz.plot_loglik(L, figsize=(6, 3.4)))
             return
@@ -896,12 +908,28 @@ class App:
         self._fig(self.fig_explore, fig)
 
     # ------------------------------------------------------------------ views of a filament
-    def _sv_target(self):
+    def _sv_target(self, view: str = "profile"):
         L = self._need_fit()
         k = self.w_manifold.value
         if k is None or k < 0 or L.manifolds_[k].dim != 1 or L.manifolds_[k].agtm is None:
             raise ValueError("select a fitted 1-D manifold first")
-        return L.manifolds_[k], {c: self.table[:, self.columns.index(c)] for c in self.w_sv_vals.value}
+        chosen = self.w_sv_vals.value if view == "profile" else self.w_sv_fvals.value
+        if not chosen:
+            raise ValueError(f"choose at least one quantity for the {'profile' if view == 'profile' else 'frames'}")
+        return L.manifolds_[k], {c: self.table[:, self.columns.index(c)] for c in chosen}
+
+    def _sv_auto(self, which: str):
+        """Draw the views of the selected filament without waiting for the buttons."""
+        L, k = self.learner, self.w_manifold.value
+        if (self._sv_silent or not self.w_sv_auto.value or L is None or L._done < 4 or k is None or k < 0
+                or L.manifolds_[k].dim != 1 or L.manifolds_[k].agtm is None):
+            return
+        if which in ("both", "profile") and self.w_sv_vals.value:
+            self._sv_profile()
+        if which in ("both", "frames") and self.w_sv_fvals.value:
+            self._sv_compute_frames()
+        if which == "both":
+            self._say("Both views of the filament are drawn above the 3-D view; move the slider to walk along it.", "success")
 
     def _sv_profile(self):
         from manydream import streamviz as sv
@@ -915,7 +943,7 @@ class App:
     def _sv_compute_frames(self):
         from manydream import streamviz as sv
 
-        m, vals = self._sv_target()
+        m, vals = self._sv_target("frames")
         self._sv_frames = sv.comoving_frames(m, self.X, vals, side=float(self.w_sv_side.value), upsample=int(self.w_sv_up.value),
                                              half_thickness=float(self.w_sv_thick.value) or None)
         n = len(self._sv_frames["centers"])

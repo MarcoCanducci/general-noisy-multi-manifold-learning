@@ -364,7 +364,10 @@ The steps expose the same choices as the library:
   the index on a thinned copy of the data (`index_preprocess`), and the inverse-density weighting
   (`index_density_weight`). It works on the filtered and diffused points of step 3.
 - **Explore**: for a 1-D manifold, the two 1-DREAM views (`manydream.streamviz`): the bi-dimensional profile,
-  and the co-moving frames with a slider to walk along the filament and a movie download.
+  and the co-moving frames with a slider to walk along the filament and a movie download. Each view has its
+  own choice of quantities (columns of the table). Both are drawn as soon as a filament is selected and
+  redrawn when their quantities change; a checkbox turns this off, and the buttons redraw after changing
+  the other settings.
 
 Because it runs in the browser it needs no X server under WSL, and it can be used on a remote
 machine through an SSH port forward (`ssh -L 5006:localhost:5006 host`, then `manydream-gui

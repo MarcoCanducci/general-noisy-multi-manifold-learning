@@ -129,7 +129,20 @@ def test_filament_views_in_the_explore_step(app):
     k = next(i for i, m in enumerate(a.learner.manifolds_) if m.dim == 1 and m.agtm is not None)
     a.w_manifold.value = k
     a._explore()
-    assert a.sv_box.visible and a.w_sv_vals.value
+    assert a.sv_box.visible and a.w_sv_vals.value and a.w_sv_fvals.value
+    # both views are drawn as soon as the filament is selected, each with its own quantities
+    assert a.fig_sv_prof.object is not None and a._sv_frames is not None and a.fig_sv_frame.object is not None
+    assert set(a._sv_frames["maps"]) - {"density"} == set(a.w_sv_fvals.value)
+    before = a.fig_sv_prof.object
+    a.w_sv_fvals.value = [a.columns[0]]                    # changing the quantities of one view redraws that view only
+    assert set(a._sv_frames["maps"]) - {"density"} == {a.columns[0]} and a.fig_sv_prof.object is before
+    a.w_sv_vals.value = [a.columns[1]]
+    assert a.fig_sv_prof.object is not before
+    a.w_sv_auto.value = False                              # without the box, the buttons decide
+    frames = a._sv_frames
+    a.w_sv_fvals.value = [a.columns[2]]
+    assert a._sv_frames is frames
+    a.w_sv_auto.value = True
     a._sv_profile()
     assert a.fig_sv_prof.object is not None
     a.w_sv_up.value = 1
