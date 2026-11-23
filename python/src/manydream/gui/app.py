@@ -182,6 +182,7 @@ class App:
         self._la_set = False         # the LAAT threshold was chosen on the slider (otherwise automatic, by Otsu's rule)
         self._preview = False        # the 3-D view shows the points that the current threshold keeps
         self._ball = None            # (radius, label) of the ball drawn in the view
+        self._radii_set = {}         # radii as last set by the program (defaults), to tell them from radii moved by hand
         for w in (self.w_f_min, self.w_la_thr):
             w.param.watch(lambda e: self._guard(self._on_threshold), "value_throttled")
         self.w_f_mode.param.watch(lambda e: self._guard(self._on_threshold), "value")
@@ -617,12 +618,14 @@ class App:
     def _follow_index_radius(self):
         """The graphs and the density models use the radius of the dimensionality index unless changed afterwards."""
         self.w_gr_r.value = self.w_ag_r.value = self.w_idx_r.value
+        self._radii_set.update(w_gr_r=self.w_gr_r.value, w_ag_r=self.w_ag_r.value)   # set here, not moved by hand
 
     def _reset_radii(self, r: float):
         """Give the radii of the steps their usual values for the scale ``r`` (step 2)."""
         for name, (factor, _) in RADII.items():
             step = float(f"{r / 50:.1g}")
             getattr(self, name).param.update(start=step, end=float(f"{3 * r:.3g}"), step=step, value=float(f"{factor * r:.3g}"))
+            self._radii_set[name] = getattr(self, name).value
         self._scores_stale()
 
     # ------------------------------------------------------------------ interactive choice of the threshold
@@ -731,7 +734,11 @@ class App:
         """A radius was moved: draw a ball of that radius in the view."""
         if self.X is None:
             return
-        self._ball = (float(getattr(self, name).value), RADII[name][1])
+        value = float(getattr(self, name).value)
+        showing = self._ball is not None and self._ball[1] == RADII[name][1]
+        if not showing and abs(value - self._radii_set.get(name, np.nan)) < 1e-12:
+            return                                         # the page echoing a value set by the program, not a radius moved by hand
+        self._ball = (value, RADII[name][1])
         if "Scale r" not in self.w_layers.value:
             self.w_layers.value = list(self.w_layers.value) + ["Scale r"]      # triggers the redraw
         else:
