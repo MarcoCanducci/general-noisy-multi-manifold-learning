@@ -30,7 +30,8 @@ LAYERS = ["Raw data", "Kept points (noisy)", "Diffused points", "Dimensionality 
           "Attached points", "AGTM (fitted graph)", "Scale r"]
 # radii that can be set per step: widget -> (default as a multiple of r, what the ball in the view is called)
 RADII = {"w_f_rad": (0.5, "filter radius"), "w_la_rad": (0.7, "radius of the ants"), "w_saf_h": (0.3, "SAF kernel scale"),
-         "w_mb_rad": (0.7, "MBMS radius"), "w_idx_r": (1.0, "radius of the dimensionality index")}
+         "w_mb_rad": (0.7, "MBMS radius"), "w_idx_r": (1.0, "radius of the dimensionality index"),
+         "w_gr_r": (1.0, "radius of the graphs"), "w_ag_r": (1.0, "radius of the attached points")}
 
 
 def suggest_radius(X, target: int = 30, sample: int = 2000, seed: int = 0) -> float:
@@ -212,6 +213,11 @@ class App:
 
         # --- 4 dimensionality
         self.w_idx_r = W.FloatSlider(name="Radius of the neighbourhoods", start=0.01, end=0.3, step=0.005, value=0.1)
+        self.w_gr_r = W.FloatSlider(name="Radius of the graphs (default: that of the dimensionality index)",
+                                    start=0.01, end=0.3, step=0.005, value=0.1)
+        self.w_ag_r = W.FloatSlider(name="Radius within which points are attached to a graph (default: that of the index)",
+                                    start=0.01, end=0.3, step=0.005, value=0.1)
+        self.w_idx_r.param.watch(lambda e: self._follow_index_radius(), "value")
         self.w_smooth = W.FloatSlider(name="Smoothing radius / radius of the neighbourhoods", start=0.0, end=5.0, step=0.1, value=1.0)
         for name in RADII:
             getattr(self, name).param.watch(lambda e, name=name: self._guard(self._on_radius, name), "value_throttled")
@@ -246,16 +252,18 @@ class App:
         # --- 5 graphs
         self.w_graph = W.Select(name="Method", options={"Manifold crawling": "crawl", "Epsilon-graph (faster)": "epsilon"})
         self.w_dims = W.MultiChoice(name="Dimensions to extract", options=[], value=[])
-        self.w_eta = W.FloatSlider(name="Step size eta (x r)", start=0.3, end=1.0, step=0.05, value=0.75)
-        self.w_beta = W.FloatSlider(name="Merge tolerance beta (x r)", start=0.1, end=0.7, step=0.05, value=0.4)
+        self.w_eta = W.FloatSlider(name="Step size eta (x radius)", start=0.3, end=1.0, step=0.05, value=0.75)
+        self.w_beta = W.FloatSlider(name="Merge tolerance beta (x radius)", start=0.1, end=0.7, step=0.05, value=0.4)
         self.w_minnodes = W.IntInput(name="Minimum nodes per graph (0 = automatic)", value=0, start=0)
         self.b_graph = W.Button(name="Extract graphs", button_type="primary")
         self.b_graph.on_click(lambda e: self._run_step(4))
         self.graph_table = pn.pane.DataFrame(None, sizing_mode="stretch_width", index=False)
         tab_graph = pn.Column(
             pn.pane.Markdown("**5. Graphs** — crawling grows a graph skeleton along each structure of the chosen "
-                             "dimension; each node has at most 2j edges."),
-            self.w_graph, self.w_dims, self.w_eta, self.w_beta, self.w_minnodes, self.b_graph, self.graph_table)
+                             "dimension; each node has at most 2j edges. The radius is the size of the local "
+                             "neighbourhoods in which the crawling fits a flat patch; it starts at the radius of "
+                             "the dimensionality index and can be changed here."),
+            self.w_graph, self.w_dims, self.w_gr_r, self.w_eta, self.w_beta, self.w_minnodes, self.b_graph, self.graph_table)
 
         # --- 6 agtm
         self.w_eps = W.IntSlider(name="Basis spacing epsilon (hops)", start=1, end=6, value=1)
@@ -271,8 +279,9 @@ class App:
         self.fig_agtm = pn.pane.Matplotlib(None, tight=True, dpi=90, sizing_mode="stretch_width")
         tab_agtm = pn.Column(
             pn.pane.Markdown("**6. Abstract GTM** — a mixture of manifold-aligned Gaussians is fitted on every "
-                             "graph, using the noisy points around it."),
-            self.w_eps, self.w_iter, self.w_degen, pn.Row(self.w_zlo, self.w_zhi), self.w_bg, self.b_agtm,
+                             "graph, using the noisy points around it: those closer to one of its nodes than the "
+                             "radius below, which starts at the radius of the dimensionality index."),
+            self.w_ag_r, self.w_eps, self.w_iter, self.w_degen, pn.Row(self.w_zlo, self.w_zhi), self.w_bg, self.b_agtm,
             self.agtm_info, self.fig_agtm)
 
         # --- 7 explore
@@ -596,6 +605,10 @@ class App:
             return [(DensityFilter, dict(radius=self.w_f_rad.value, min_points=self.w_f_min.value, mode=self.w_f_mode.value))]
         return []
 
+    def _follow_index_radius(self):
+        """The graphs and the density models use the radius of the dimensionality index unless changed afterwards."""
+        self.w_gr_r.value = self.w_ag_r.value = self.w_idx_r.value
+
     def _reset_radii(self, r: float):
         """Give the radii of the steps their usual values for the scale ``r`` (step 2)."""
         for name, (factor, _) in RADII.items():
@@ -745,7 +758,8 @@ class App:
             zb = (self.w_zlo.value if self.w_zlo.value > 0 else 0.0, self.w_zhi.value if self.w_zhi.value > 0 else np.inf)
         return dict(
             r=float(self.w_r.value), preprocess=self._preprocess_spec(), smooth_factor=self.w_smooth.value,
-            index_radius=float(self.w_idx_r.value),
+            index_radius=float(self.w_idx_r.value), graph_radius=float(self.w_gr_r.value),
+            agtm_radius=float(self.w_ag_r.value),
             index_preprocess=self._as_spec(self._index_steps()), index_density_weight=bool(self.w_idx_weight.value),
             graph=self.w_graph.value, dims=sorted(int(j) for j in self.w_dims.value), eta=self.w_eta.value,
             beta=self.w_beta.value, min_nodes=self.w_minnodes.value or None, epsilon=self.w_eps.value,
@@ -941,6 +955,20 @@ class App:
             axes = list(range(min(3, len(feats))))
         return viz.View(self.X, axes=axes, names=feats)
 
+    @staticmethod
+    def _ball_centre(V, rad: float, flat: bool):
+        """Where to draw the ball in the view: near the boundary of the data, where there are fewest points,
+        so that it does not hide them. ``V`` are the viewed coordinates of the raw data."""
+        V = np.asarray(V, float)[:, : (2 if flat else 3)]
+        lo, hi = V.min(0), V.max(0)
+        pad = np.minimum(1.2 * rad, 0.45 * (hi - lo))
+        levels = [np.array([lo[k] + pad[k], 0.5 * (lo[k] + hi[k]), hi[k] - pad[k]]) for k in range(V.shape[1])]
+        grid = np.stack(np.meshgrid(*levels, indexing="ij"), -1).reshape(-1, V.shape[1])
+        grid = grid[np.arange(len(grid)) != len(grid) // 2]            # not the middle of the box
+        near = [(np.linalg.norm(V - c, axis=1) < 1.5 * rad).sum() for c in grid]
+        c = grid[int(np.argmin(near))]                                 # ties: the first, so the place does not jump
+        return c if not flat else np.r_[c, 0.0]
+
     def refresh_view(self):
         if self.X is None:
             return
@@ -995,10 +1023,8 @@ class App:
                 if "AGTM (fitted graph)" in on and fitted and it.agtm is not None:
                     sc.lines(f"AGTM {k}", v(it.agtm.means_), g.edges, c if "Graphs" not in on else "#0b0b0b", 2.5)
         if "Scale r" in on and L is not None:
-            ref = L.preprocess_.diffused if L._done >= 1 else self.X
-            centre = ref[np.argmin(np.linalg.norm(ref - np.median(ref, 0), axis=1))]
             rad, what = self._ball if self._ball is not None else (float(L.r), "scale r")
-            sc.sphere(f"{what} = {rad:g}", v(centre[None])[0], rad)
+            sc.sphere(f"{what} = {rad:g}", self._ball_centre(v(self.X[sub(len(self.X))]), rad, sc.flat), rad)
         if not sc.layers:
             sc.points("raw data", v(self.X[sub(len(self.X))]), "#b9b8b2", 1.5, 0.3)
         pane, used = render(sc, self.backend, pane=getattr(self, "_pane", None),
@@ -1111,6 +1137,7 @@ class App:
             "", f"preprocess = {pre}", f"index_preprocess = {idx}      # where the dimensionality index is estimated", "",
             "learner = manydream.MultiManifoldLearner(",
             f"    r={p['r']!r}, preprocess=preprocess, index_radius={p['index_radius']!r}, smooth_factor={p['smooth_factor']!r},",
+            f"    graph_radius={p['graph_radius']!r}, agtm_radius={p['agtm_radius']!r},",
             f"    index_preprocess=index_preprocess, index_density_weight={p['index_density_weight']!r},",
             f"    graph={p['graph']!r}, dims={p['dims']!r}, eta={p['eta']!r}, beta={p['beta']!r}, "
             f"min_nodes={p['min_nodes']!r},",
