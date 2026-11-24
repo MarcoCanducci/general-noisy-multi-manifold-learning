@@ -5,6 +5,7 @@ import argparse
 import io
 import pickle
 import tempfile
+import time
 import traceback
 import warnings
 from pathlib import Path
@@ -25,7 +26,7 @@ EXAMPLES = {
     "3-torus (4-D)": lambda: datasets.make_torus3(random_state=0),
 }
 EXAMPLE_R = {"Three interlocked toroids (3-D)": 0.1, "Mixed manifolds D1 (3-D)": 0.1,
-             "Three filaments (3-D)": 0.1, "3-torus (4-D)": 1.0}
+             "Three filaments (3-D)": 0.1, "3-torus (4-D)": 1.5}
 LAYERS = ["Raw data", "Kept points (noisy)", "Diffused points", "Dimensionality index", "Graphs",
           "Attached points", "AGTM (fitted graph)", "Scale r"]
 # radii that can be set per step: widget -> (default as a multiple of r, what the ball in the view is called)
@@ -183,6 +184,7 @@ class App:
         self._preview = False        # the 3-D view shows the points that the current threshold keeps
         self._ball = None            # (radius, label) of the ball drawn in the view
         self._radii_set = {}         # radii as last set by the program (defaults), to tell them from radii moved by hand
+        self._radii_reset = {}       # radius -> (value, time) of the last reset, to undo a clipped value reported by the page
         for w in (self.w_f_min, self.w_la_thr):
             w.param.watch(lambda e: self._guard(self._on_threshold), "value_throttled")
         self.w_f_mode.param.watch(lambda e: self._guard(self._on_threshold), "value")
@@ -222,6 +224,7 @@ class App:
         self.w_smooth = W.FloatSlider(name="Smoothing radius / radius of the neighbourhoods", start=0.0, end=5.0, step=0.1, value=1.0)
         for name in RADII:
             getattr(self, name).param.watch(lambda e, name=name: self._guard(self._on_radius, name), "value_throttled")
+            getattr(self, name).param.watch(lambda e, name=name: self._keep_reset_radius(name, e.new), "value")
         self.w_idx_thin = W.Checkbox(name="Estimate the index on a thinned copy of the data, then carry it to all points",
                                      value=False)
         self.w_idx_rad = W.FloatSlider(name="Thinning radius / r (index only)", start=0.2, end=2.0, step=0.05, value=0.6,
@@ -621,11 +624,22 @@ class App:
         self._radii_set.update(w_gr_r=v, w_ag_r=v)         # recorded first: setting a slider reports it as moved at once
         self.w_gr_r.value = self.w_ag_r.value = v
 
+    def _keep_reset_radius(self, name: str, value: float):
+        """When the range of a slider changes together with its value, the page may apply the value first, clip it to
+        the old range and report the clipped value back. Shortly after a reset, such a value is replaced by the intended one."""
+        want, when, old = self._radii_reset.get(name, (None, 0.0, (0.0, 0.0)))
+        clipped = any(abs(float(value) - b) < 1e-9 for b in old)           # the value pushed to an end of the old range
+        if want is not None and time.monotonic() - when < 5.0 and clipped and abs(float(value) - want) > 1e-12:
+            self._radii_reset[name] = (want, 0.0, old)     # once only
+            getattr(self, name).value = want
+
     def _reset_radii(self, r: float):
         """Give the radii of the steps their usual values for the scale ``r`` (step 2)."""
         for name, (factor, _) in RADII.items():
             step = float(f"{r / 50:.1g}")
             self._radii_set[name] = float(f"{factor * r:.3g}")       # recorded first: setting a slider reports it as moved at once
+            w = getattr(self, name)
+            self._radii_reset[name] = (self._radii_set[name], time.monotonic(), (float(w.start), float(w.end)))
             getattr(self, name).param.update(start=step, end=float(f"{3 * r:.3g}"), step=step, value=self._radii_set[name])
         self._scores_stale()
 
