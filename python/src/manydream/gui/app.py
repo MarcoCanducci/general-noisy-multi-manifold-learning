@@ -627,11 +627,14 @@ class App:
     def _keep_reset_radius(self, name: str, value: float):
         """When the range of a slider changes together with its value, the page may apply the value first, clip it to
         the old range and report the clipped value back. Shortly after a reset, such a value is replaced by the intended one."""
+        if self._clipped_by_page(name, value):
+            getattr(self, name).value = self._radii_reset[name][0]
+
+    def _clipped_by_page(self, name: str, value: float) -> bool:
+        """True if ``value`` is the intended value of a just-reset slider pushed to an end of its old range."""
         want, when, old = self._radii_reset.get(name, (None, 0.0, (0.0, 0.0)))
-        clipped = any(abs(float(value) - b) < 1e-9 for b in old)           # the value pushed to an end of the old range
-        if want is not None and time.monotonic() - when < 5.0 and clipped and abs(float(value) - want) > 1e-12:
-            self._radii_reset[name] = (want, 0.0, old)     # once only
-            getattr(self, name).value = want
+        return (want is not None and time.monotonic() - when < 5.0 and abs(float(value) - want) > 1e-12
+                and any(abs(float(value) - b) < 1e-9 for b in old))
 
     def _reset_radii(self, r: float):
         """Give the radii of the steps their usual values for the scale ``r`` (step 2)."""
@@ -750,6 +753,9 @@ class App:
         if self.X is None:
             return
         value = float(getattr(self, name).value)
+        want, when, _ = self._radii_reset.get(name, (None, 0.0, None))
+        if self._clipped_by_page(name, value) or (want is not None and time.monotonic() - when < 5.0 and abs(value - want) < 1e-12):
+            return                                         # the page settling after a reset, not a radius moved by hand
         showing = self._ball is not None and self._ball[1] == RADII[name][1]
         if not showing and abs(value - self._radii_set.get(name, np.nan)) < 1e-12:
             return                                         # the page echoing a value set by the program, not a radius moved by hand
